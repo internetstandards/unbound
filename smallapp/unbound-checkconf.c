@@ -538,6 +538,10 @@ morechecks(struct config_file* cfg)
 		&& strcmp(cfg->module_conf, "dns64 validator cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 cachedb iterator") != 0
 #endif
+#ifdef USE_INTERNETNL
+		&& strcmp(cfg->module_conf, "internetnl validator iterator") != 0
+		&& strcmp(cfg->module_conf, "internetnl iterator") != 0
+#endif
 #if defined(WITH_PYTHONMODULE) && defined(USE_CACHEDB)
 		&& strcmp(cfg->module_conf, "python dns64 cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "python dns64 validator cachedb iterator") != 0

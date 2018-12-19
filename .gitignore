@@ -39,4 +39,5 @@
 /contrib/libunbound.pc
 /contrib/unbound.service
 /contrib/unbound.socket
-
+cscope.out
+tags

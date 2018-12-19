@@ -5883,7 +5883,7 @@ yyreduce:
   case 538:
 #line 2876 "./util/configparser.y" /* yacc.c:1646  */
     {
-	#if defined(USE_CACHEDB) && defined(USE_REDIS)
+	#if (defined(USE_CACHEDB)||defined(USE_INTERNETNL)) && defined(USE_REDIS)
 		OUTYY(("P(redis_server_host:%s)\n", (yyvsp[0].str)));
 		free(cfg_parser->cfg->redis_server_host);
 		cfg_parser->cfg->redis_server_host = (yyvsp[0].str);
@@ -5898,7 +5898,7 @@ yyreduce:
   case 539:
 #line 2888 "./util/configparser.y" /* yacc.c:1646  */
     {
-	#if defined(USE_CACHEDB) && defined(USE_REDIS)
+	#if (defined(USE_CACHEDB)||defined(USE_INTERNETNL)) && defined(USE_REDIS)
 		int port;
 		OUTYY(("P(redis_server_port:%s)\n", (yyvsp[0].str)));
 		port = atoi((yyvsp[0].str));
@@ -5916,7 +5916,7 @@ yyreduce:
   case 540:
 #line 2903 "./util/configparser.y" /* yacc.c:1646  */
     {
-	#if defined(USE_CACHEDB) && defined(USE_REDIS)
+	#if (defined(USE_CACHEDB)||defined(USE_INTERNETNL)) && defined(USE_REDIS)
 		OUTYY(("P(redis_timeout:%s)\n", (yyvsp[0].str)));
 		if(atoi((yyvsp[0].str)) == 0)
 			yyerror("redis timeout value expected");

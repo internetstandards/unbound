@@ -1560,6 +1560,17 @@ case "$enable_cachedb" in
     	;;
 esac
 
+# check for internetnl if requested
+AC_ARG_ENABLE(internetnl, AC_HELP_STRING([--enable-internetnl], [enable internetnl module]))
+case "$enable_internetnl" in
+    yes)
+    	AC_DEFINE([USE_INTERNETNL], [1], [Define to 1 to use internetnl support])
+    	;;
+    no|*)
+    	# nothing
+    	;;
+esac
+
 # check for ipsecmod if requested
 AC_ARG_ENABLE(ipsecmod, AC_HELP_STRING([--enable-ipsecmod], [Enable ipsecmod module that facilitates opportunistic IPsec]))
 case "$enable_ipsecmod" in
