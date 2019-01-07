@@ -82,6 +82,14 @@
 #define MAIL_KEY_PREAMBLE	"interactivemailtest"
 #define MX_STR 			"%s." MAIL_LAB_STR "." BASE_DOMAIN_STR \
 				" MX 10 %s." SIGNED_LAB_STR "." BASE_DOMAIN_STR
+#define DKIM_STR		"selector._domainkey.%s." MAIL_LAB_STR "." \
+				BASE_DOMAIN_STR " TXT ( \"v=DKIM1; k=rsa; \"" \
+				"\"p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDj" \
+				"PYKCT+VzEi5Umi+PVpd4JrcSVzSzIdTkujlV8tapfdp2" \
+				"irWneTHJnqMeVoqJBrmRKB1magIZwGJCa3zgD4pgS3ot" \
+				"OElQ2MNrtS7trUwiXiWHZ/a3XJd9xORCRohFuYPoltBZ" \
+				"/Ta9YKHvFf+HF5GJ0U6JBkfJvyDLPJjqe6Y+8wIDAQAB" \
+				"\" )"
 
 static redisContext*
 redis_connect(struct internetnl_env* internetnl_env)
@@ -344,7 +352,7 @@ internetnl_handle_query(struct module_qstate* qstate,
 	char testid[ID_LABLEN+1];
 	testid[ID_LABLEN] = '\0';
 
-	verbose(VERB_QUERY, "internetnll %d", qstate->qinfo.qtype);
+	qstate->no_cache_store = 1;
 	if(dname_strict_subdomain(
 		qstate->qinfo.qname, dname_count_labels(qstate->qinfo.qname),
 		(uint8_t*)MAIL_LAB BASE_DOMAIN, MAIL_LAB_LABS + BASE_DOMAIN_LABS)) {
@@ -380,12 +388,6 @@ internetnl_handle_query(struct module_qstate* qstate,
 			if(!redis_register_mailtest(qstate->env, ie, "dkim",
 				(char*)testid))
 				goto bail_out;
-		}
-		else if(qstate->qinfo.qtype == LDNS_RR_TYPE_MX &&
-			dname_count_labels(qstate->qinfo.qname) == 
-			MAIL_LAB_LABS + BASE_DOMAIN_LABS + 1) {
-			/* Do not let the iterator cache this result */
-			qstate->no_cache_store = 1;
 		}
 	}
 	else if(dname_strict_subdomain(
@@ -484,6 +486,32 @@ rrset_from_str(struct regional* region, const char* rrstr)
 }
 
 static void
+rep_from_rrstr(struct module_qstate* qstate, const char* rrstr)
+{
+	struct reply_info* new_rep = NULL;
+	struct ub_packed_rrset_key* rrset = NULL;
+
+	if(!(rrset = rrset_from_str(qstate->region, rrstr)))
+		return;
+	new_rep = construct_reply_info_base(
+		qstate->region, qstate->return_msg->rep->flags,
+		qstate->return_msg->rep->qdcount, 
+		qstate->return_msg->rep->ttl, 
+		qstate->return_msg->rep->prefetch_ttl,
+		qstate->return_msg->rep->serve_expired_ttl,
+		1, 0, 0, 1,
+		sec_status_insecure);
+	if(!new_rep)
+		return;
+	if(!reply_info_alloc_rrset_keys(new_rep, NULL,
+		qstate->region))
+		return;
+	new_rep->rrsets[0] = rrset;
+	qstate->return_msg->rep = new_rep;
+	qstate->return_msg->rep->flags |= BIT_AA;
+}
+
+static void
 internetnl_handle_response(struct module_qstate* qstate,
 	struct internetnl_qstate* ATTR_UNUSED(iq), struct internetnl_env* ie,
 	int id)
@@ -499,37 +527,31 @@ internetnl_handle_response(struct module_qstate* qstate,
 
 	if(dname_strict_subdomain(
 		qstate->qinfo.qname, dname_count_labels(qstate->qinfo.qname),
-		(uint8_t*)MAIL_LAB BASE_DOMAIN, 4) &&
-		qstate->qinfo.qtype == LDNS_RR_TYPE_MX &&
-		dname_count_labels(qstate->qinfo.qname) == 5) {
+		(uint8_t*)MAIL_LAB BASE_DOMAIN, 
+		MAIL_LAB_LABS + BASE_DOMAIN_LABS)) {
+		if(qstate->qinfo.qtype == LDNS_RR_TYPE_MX &&
+			dname_count_labels(qstate->qinfo.qname) == 
+			MAIL_LAB_LABS + BASE_DOMAIN_LABS + 1) {
 			/* Inject unique mx host */
-			struct reply_info* new_rep = NULL;
-			struct ub_packed_rrset_key* mxrr = NULL;
 			char mxstr[sizeof(testid)*2+sizeof(MX_STR)];
-
 			/* MX query, 1st label is ID */	
 			if(!dname_lab_str(qstate->qinfo.qname, 1, testid,
 				ID_LABLEN+1))
 				return;
 			snprintf(mxstr, sizeof(mxstr), MX_STR, testid, testid);
-			if(!(mxrr = rrset_from_str(qstate->region, mxstr)))
+			rep_from_rrstr(qstate, mxstr);
+		} else if(qstate->qinfo.qtype == LDNS_RR_TYPE_TXT &&
+			dname_count_labels(qstate->qinfo.qname) == 
+			MAIL_LAB_LABS + BASE_DOMAIN_LABS +
+			3 /* selector + _domainkey + id */) {
+			char dkimstr[sizeof(testid)+sizeof(DKIM_STR)];
+			/* DKIM query, 1st label is ID */	
+			if(!dname_lab_str(qstate->qinfo.qname, 3, testid,
+				ID_LABLEN+1))
 				return;
-			new_rep = construct_reply_info_base(
-				qstate->region, qstate->return_msg->rep->flags,
-				qstate->return_msg->rep->qdcount, 
-				qstate->return_msg->rep->ttl, 
-				qstate->return_msg->rep->prefetch_ttl,
-				qstate->return_msg->rep->serve_expired_ttl,
-				1, 0, 0, 1,
-				sec_status_insecure);
-			if(!new_rep)
-				return;
-			if(!reply_info_alloc_rrset_keys(new_rep, NULL,
-				qstate->region))
-				return;
-			new_rep->rrsets[0] = mxrr;
-			qstate->return_msg->rep = new_rep;
-			qstate->return_msg->rep->flags |= BIT_AA;
+			snprintf(dkimstr, sizeof(dkimstr), DKIM_STR, testid);
+			rep_from_rrstr(qstate, dkimstr);
+		}
 	}
 }
 
