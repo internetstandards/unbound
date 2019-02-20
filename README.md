@@ -35,12 +35,18 @@ will be logged. Connection test queries are a subdomain of `<client-log-lab>`.`<
 Addresses will be logged in a redis set, with as key "ns\_`<qname>`"
 
 ## Installation
+ - Make sure that `swig` >= 3.0 is installed on your system
+
+   `apt install swig3.0`
  - Change #defines on top of internetnl/internetnl.c to match test environment
- - ./configure --prefix=$HOME/usr/local --enable-internetnl --with-libhiredis
- - make install
+ - Patch unbound with internet.nl's patch
+
+   `patch -p0 -i /path/to/unbound_1.8.0_patch_unsupported_ds.diff`
+ - `./configure --prefix=$HOME/usr/local --enable-internetnl --with-pyunbound --with-libevent --with-libhiredis`
+ - `make install`
 
 ## Configuration
-Zonfiles are available in the internetnl directory. Don't forget to update the
+Example zonefiles are available in the `internetnl` directory. Don't forget to update the
 DKIM, SPF and DMARC values to match the sending MTA, and the IP addresses.
 
 ```
