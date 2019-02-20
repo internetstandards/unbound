@@ -1,0 +1,16 @@
+	SOA ns.nlnetlabs.nl. ralph.nlnetlabs.nl. (
+		1
+		14400
+		3600
+		604800
+		3600
+	)
+	NS ns
+
+*		TXT "v=spf1 mx -all"
+		TXT "v=DMARC1; p=reject; rua=mailto:dmarc-reports@internet.nl"
+ns	A	185.49.141.11
+	AAAA	2a04:b900:0:100::11
+
+; No MX record here, this will be added by the internetnl Unbound module,
+; therefore this zone must be unsigned.
