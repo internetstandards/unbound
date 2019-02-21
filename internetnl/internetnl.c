@@ -56,6 +56,9 @@
 #include "sldns/str2wire.h"
 #include "services/mesh.h"
 
+#define CONN_TEST_TTL "60"
+#define MAIL_TEST_TTL "604800"  /*1 week*/
+
 /* Base domain, containing delegations to test zones. */ 
 #define BASE_DOMAIN		"\010internet\002nl\000"
 #define BASE_DOMAIN_STR		"internet.nl."
@@ -72,7 +75,7 @@
 #define SIGNED_LAB_LABS		1
 /* Zone served by this Unbound instance, must be a signed delegation from base
  * domain, with only an IPv6 glue address. */
-#define SIGNED_LAB6		"\021test-ns6-signed"
+#define SIGNED_LAB6		"\017test-ns6-signed"
 #define SIGNED_LAB6_STR		"test-ns6-signed"
 #define SIGNED_LAB6_LABS	1
 
@@ -169,11 +172,11 @@ redis_register_mailtest(struct module_env* env,
 	const char* testid)
 {
 	int n;
-	/* "SET " preamble + ":" + mailtest + ":" + testid + " 1\0" */
-	char cmd[4+strlen(MAIL_KEY_PREAMBLE)+1+strlen("dmarc")+1+ID_LABLEN+3]; 
+	/* "SET " preamble + ":" + mailtest + ":" + testid + " 1 " + MAIL_TEST_TTL + "\0" */
+	char cmd[4+strlen(MAIL_KEY_PREAMBLE)+1+strlen("dmarc")+1+ID_LABLEN+3+strlen(MAIL_TEST_TTL)+1];
 
-	n = snprintf(cmd, sizeof(cmd), "SET %s:%s:%s 1", MAIL_KEY_PREAMBLE,
-		mailtest, testid);
+	n = snprintf(cmd, sizeof(cmd), "SET %s:%s:%s 1 %s", MAIL_KEY_PREAMBLE,
+		mailtest, testid, MAIL_TEST_TTL);
 	if(n < 0 || n >= (int)sizeof(cmd))
 		return 0;
 	return redis_cmd(env, internetnl_env, cmd);
@@ -196,6 +199,22 @@ redis_register_client(struct module_env* env,
 	return redis_cmd(env, internetnl_env, cmd);
 }
 
+static int
+redis_register_client_ttl(struct module_env* env,
+	struct internetnl_env* internetnl_env, struct module_qstate* qstate,
+	const char* clientip)
+{
+	int n;
+	/* "EXPIRE ns_" + qname + " " + CONN_TEST_TTL + "\0" */
+	char qname[LDNS_MAX_DOMAINLEN+1];
+	char cmd[10+sizeof(qname)+1+strlen(CONN_TEST_TTL)+1];
+
+	dname_str(qstate->qinfo.qname, qname);
+	n = snprintf(cmd, sizeof(cmd), "EXPIRE ns_%s %s", qname, CONN_TEST_TTL);
+	if(n < 0 || n >= (int)sizeof(cmd))
+		return 0;
+	return redis_cmd(env, internetnl_env, cmd);
+}
 int 
 internetnl_init(struct module_env* env, int id)
 {
@@ -424,6 +443,9 @@ internetnl_handle_query(struct module_qstate* qstate,
 			clientip_buf, sizeof(clientip_buf));
 		}
 		if(!redis_register_client(qstate->env, ie, qstate,
+			clientip_buf))
+			goto bail_out;
+		if(!redis_register_client_ttl(qstate->env, ie, qstate,
 			clientip_buf))
 			goto bail_out;
 	}
