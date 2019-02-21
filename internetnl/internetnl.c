@@ -175,7 +175,7 @@ redis_register_mailtest(struct module_env* env,
 	/* "SET " preamble + ":" + mailtest + ":" + testid + " 1 EX " + MAIL_TEST_TTL + "\0" */
 	char cmd[4+strlen(MAIL_KEY_PREAMBLE)+1+strlen("dmarc")+1+ID_LABLEN+6+strlen(MAIL_TEST_TTL)+1];
 
-	n = snprintf(cmd, sizeof(cmd), "SET %s:%s:%s 1 %s", MAIL_KEY_PREAMBLE,
+	n = snprintf(cmd, sizeof(cmd), "SET %s:%s:%s 1 EX %s", MAIL_KEY_PREAMBLE,
 		mailtest, testid, MAIL_TEST_TTL);
 	if(n < 0 || n >= (int)sizeof(cmd))
 		return 0;
@@ -205,9 +205,9 @@ redis_register_client_ttl(struct module_env* env,
 	const char* clientip)
 {
 	int n;
-	/* "EXPIRE ns_" + qname + " EX " + CONN_TEST_TTL + "\0" */
+	/* "EXPIRE ns_" + qname + " " + CONN_TEST_TTL + "\0" */
 	char qname[LDNS_MAX_DOMAINLEN+1];
-	char cmd[10+sizeof(qname)+4+strlen(CONN_TEST_TTL)+1];
+	char cmd[10+sizeof(qname)+1+strlen(CONN_TEST_TTL)+1];
 
 	dname_str(qstate->qinfo.qname, qname);
 	n = snprintf(cmd, sizeof(cmd), "EXPIRE ns_%s %s", qname, CONN_TEST_TTL);
