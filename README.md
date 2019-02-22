@@ -79,6 +79,11 @@ Make the bogus wildcard records bogus by deleting RRSIGs:
  - `sed -ie '/bogus.*IN\tRRSIG/d' test-ns-signed.zone.signed`
  - `sed -ie '/bogus.*IN\tRRSIG/d' test-ns6-signed.zone.signed`
 
+After signing the zones need to be reloaded by Unbound:
+ - `~/usr/local/sbin/unbound-control auth_zone_reload test-ns-signed.internet.nl.`
+ - `~/usr/local/sbin/unbound-control auth_zone_reload test-ns6-signed.internet.nl.A`
+ 
+
 Signing (and making the bogus records bogus) must be done periodically to
 prevent signatures from going to expire! It is recommendable to make a simple
 script to execute the ldns-signzone and sed commands from cron.
