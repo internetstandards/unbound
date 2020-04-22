@@ -1124,8 +1124,11 @@ mesh_do_callback(struct mesh_state* m, int rcode, struct reply_info* rep,
 	else	secure = 0;
 	if(!rep && rcode == LDNS_RCODE_NOERROR)
 		rcode = LDNS_RCODE_SERVFAIL;
-	if(!rcode && (rep->security == sec_status_bogus ||
-		rep->security == sec_status_secure_sentinel_fail)) {
+	/* internetnl patch:
+	 * Write to reason even if not bogus. Will pass the DS unsupported value.
+	 * reason ends up as the why_bogus value . */
+	if(!rcode) /*&& (rep->security == sec_status_bogus ||
+		rep->security == sec_status_secure_sentinel_fail))*/ {
 		if(!(reason = errinf_to_str_bogus(&m->s)))
 			rcode = LDNS_RCODE_SERVFAIL;
 	}

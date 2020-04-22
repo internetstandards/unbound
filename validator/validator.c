@@ -2706,6 +2706,10 @@ ds_response_to_ke(struct module_qstate* qstate, struct val_qstate* vq,
 			*ke = key_entry_create_null(qstate->region, 
 				qinfo->qname, qinfo->qname_len, qinfo->qclass, 
 				ub_packed_rrset_ttl(ds), *qstate->env->now);
+			/* internetnl patch:
+			 * Write custom string to qstate->errinf. Will eventually end up
+			 * to the why_bogus variable. */
+			errinf(qstate, "internetnl - DS unsupported.");
 			return (*ke) != NULL;
 		}
 

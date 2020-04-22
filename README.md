@@ -8,9 +8,6 @@ interactive mail test on internet.nl.
 
    `apt install swig3.0`
  - Change #defines on top of internetnl/internetnl.c to match test environment
- - Patch unbound with internet.nl's patch
-
-   `patch -p0 -i /path/to/unbound_1.8.0_patch_unsupported_ds.diff`
  - `./configure --prefix=$HOME/usr/local --enable-internetnl --with-pyunbound --with-libevent --with-libhiredis`
  - `make install`
 
