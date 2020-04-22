@@ -484,6 +484,63 @@ iter_filter_order(struct iter_env* iter_env, struct module_env* env,
 			got_num = num4ok;
 			*selected_rtt = num4_lowrtt;
 		}
+	} else if (env->cfg->prefer_ip4) {
+		int got_num4 = 0;
+		int low_rtt4 = 0;
+		int i;
+		int attempt = -1; /* filter to make sure addresses have
+		  less attempts on them than the first, to force round
+		  robin when all the IPv4 addresses fail */
+		int num6ok = 0; /* number ip6 at low attempt count */
+		int num6_lowrtt = 0;
+		prev = NULL;
+		a = dp->result_list;
+		for(i = 0; i < got_num; i++) {
+			swap_to_front = 0;
+			if(a->addr.ss_family != AF_INET && attempt == -1) {
+				/* if we only have ip6 at low attempt count,
+				 * then ip4 is failing, and we need to
+				 * select one of the remaining IPv6 addrs */
+				attempt = a->attempts;
+				num6ok++;
+				num6_lowrtt = a->sel_rtt;
+			} else if(a->addr.ss_family != AF_INET && attempt == a->attempts) {
+				num6ok++;
+				if(num6_lowrtt == 0 || a->sel_rtt < num6_lowrtt) {
+					num6_lowrtt = a->sel_rtt;
+				}
+			}
+			if(a->addr.ss_family == AF_INET) {
+				if(attempt == -1) {
+					attempt = a->attempts;
+				} else if(a->attempts > attempt) {
+					break;
+				}
+				got_num4++;
+				swap_to_front = 1;
+				if(low_rtt4 == 0 || a->sel_rtt < low_rtt4) {
+					low_rtt4 = a->sel_rtt;
+				}
+			}
+			/* swap to front if IPv4, or move to next result */
+			if(swap_to_front && prev) {
+				n = a->next_result;
+				prev->next_result = n;
+				a->next_result = dp->result_list;
+				dp->result_list = a;
+				a = n;
+			} else {
+				prev = a;
+				a = a->next_result;
+			}
+		}
+		if(got_num4 > 0) {
+			got_num = got_num4;
+			*selected_rtt = low_rtt4;
+		} else if(num6ok > 0) {
+			got_num = num6ok;
+			*selected_rtt = num6_lowrtt;
+		}
 	}
 	return got_num;
 }
@@ -882,10 +939,35 @@ rrset_equal(struct ub_packed_rrset_key* k1, struct ub_packed_rrset_key* k2)
 	return 1;
 }
 
+/** compare rrsets and sort canonically.  Compares rrset name, type, class.
+ * return 0 if equal, +1 if x > y, and -1 if x < y.
+ */
+static int
+rrset_canonical_sort_cmp(const void* x, const void* y)
+{
+	struct ub_packed_rrset_key* rrx = *(struct ub_packed_rrset_key**)x;
+	struct ub_packed_rrset_key* rry = *(struct ub_packed_rrset_key**)y;
+	int r = dname_canonical_compare(rrx->rk.dname, rry->rk.dname);
+	if(r != 0)
+		return r;
+	if(rrx->rk.type != rry->rk.type) {
+		if(ntohs(rrx->rk.type) > ntohs(rry->rk.type))
+			return 1;
+		else	return -1;
+	}
+	if(rrx->rk.rrset_class != rry->rk.rrset_class) {
+		if(ntohs(rrx->rk.rrset_class) > ntohs(rry->rk.rrset_class))
+			return 1;
+		else	return -1;
+	}
+	return 0;
+}
+
 int 
 reply_equal(struct reply_info* p, struct reply_info* q, struct regional* region)
 {
 	size_t i;
+	struct ub_packed_rrset_key** sorted_p, **sorted_q;
 	if(p->flags != q->flags ||
 		p->qdcount != q->qdcount ||
 		/* do not check TTL, this may differ */
@@ -899,16 +981,43 @@ reply_equal(struct reply_info* p, struct reply_info* q, struct regional* region)
 		p->ar_numrrsets != q->ar_numrrsets ||
 		p->rrset_count != q->rrset_count)
 		return 0;
+	/* sort the rrsets in the authority and additional sections before
+	 * compare, the query and answer sections are ordered in the sequence
+	 * they should have (eg. one after the other for aliases). */
+	sorted_p = (struct ub_packed_rrset_key**)regional_alloc_init(
+		region, p->rrsets, sizeof(*sorted_p)*p->rrset_count);
+	if(!sorted_p) return 0;
+	log_assert(p->an_numrrsets + p->ns_numrrsets + p->ar_numrrsets <=
+		p->rrset_count);
+	qsort(sorted_p + p->an_numrrsets, p->ns_numrrsets,
+		sizeof(*sorted_p), rrset_canonical_sort_cmp);
+	qsort(sorted_p + p->an_numrrsets + p->ns_numrrsets, p->ar_numrrsets,
+		sizeof(*sorted_p), rrset_canonical_sort_cmp);
+
+	sorted_q = (struct ub_packed_rrset_key**)regional_alloc_init(
+		region, q->rrsets, sizeof(*sorted_q)*q->rrset_count);
+	if(!sorted_q) {
+		regional_free_all(region);
+		return 0;
+	}
+	log_assert(q->an_numrrsets + q->ns_numrrsets + q->ar_numrrsets <=
+		q->rrset_count);
+	qsort(sorted_q + q->an_numrrsets, q->ns_numrrsets,
+		sizeof(*sorted_q), rrset_canonical_sort_cmp);
+	qsort(sorted_q + q->an_numrrsets + q->ns_numrrsets, q->ar_numrrsets,
+		sizeof(*sorted_q), rrset_canonical_sort_cmp);
+
+	/* compare the rrsets */
 	for(i=0; i<p->rrset_count; i++) {
-		if(!rrset_equal(p->rrsets[i], q->rrsets[i])) {
-			if(!rrset_canonical_equal(region, p->rrsets[i],
-				q->rrsets[i])) {
+		if(!rrset_equal(sorted_p[i], sorted_q[i])) {
+			if(!rrset_canonical_equal(region, sorted_p[i],
+				sorted_q[i])) {
 				regional_free_all(region);
 				return 0;
 			}
-			regional_free_all(region);
 		}
 	}
+	regional_free_all(region);
 	return 1;
 }
 
@@ -1157,6 +1266,19 @@ iter_scrub_ds(struct dns_msg* msg, struct ub_packed_rrset_key* ns, uint8_t* z)
 		}
 		i++;
 	}
+}
+
+void
+iter_scrub_nxdomain(struct dns_msg* msg)
+{
+	if(msg->rep->an_numrrsets == 0)
+		return;
+
+	memmove(msg->rep->rrsets, msg->rep->rrsets+msg->rep->an_numrrsets,
+		sizeof(struct ub_packed_rrset_key*) *
+		(msg->rep->rrset_count-msg->rep->an_numrrsets));
+	msg->rep->rrset_count -= msg->rep->an_numrrsets;
+	msg->rep->an_numrrsets = 0;
 }
 
 void iter_dec_attempts(struct delegpt* dp, int d)

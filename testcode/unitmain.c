@@ -538,10 +538,8 @@ rnd_test(void)
 	struct ub_randstate* r;
 	int num = 1000, i;
 	long int a[1000];
-	unsigned int seed = (unsigned)time(NULL);
 	unit_show_feature("ub_random");
-	printf("ub_random seed is %u\n", seed);
-	unit_assert( (r = ub_initstate(seed, NULL)) );
+	unit_assert( (r = ub_initstate(NULL)) );
 	for(i=0; i<num; i++) {
 		a[i] = ub_random(r);
 		unit_assert(a[i] >= 0);
@@ -869,7 +867,13 @@ main(int argc, char* argv[])
 		printf("\tperforms unit tests.\n");
 		return 1;
 	}
+	/* Disable roundrobin for the unit tests */
+	RRSET_ROUNDROBIN = 0;
+#ifdef USE_LIBEVENT
+	printf("Start of %s+libevent unit test.\n", PACKAGE_STRING);
+#else
 	printf("Start of %s unit test.\n", PACKAGE_STRING);
+#endif
 #ifdef HAVE_SSL
 #  ifdef HAVE_ERR_LOAD_CRYPTO_STRINGS
 	ERR_load_crypto_strings();
@@ -907,7 +911,7 @@ main(int argc, char* argv[])
 	ecs_test();
 #endif /* CLIENT_SUBNET */
 	if(log_get_lock()) {
-		lock_quick_destroy((lock_quick_type*)log_get_lock());
+		lock_basic_destroy((lock_basic_type*)log_get_lock());
 	}
 	checklock_stop();
 	printf("%d checks ok.\n", testcount);
@@ -919,7 +923,9 @@ main(int argc, char* argv[])
 #  ifdef HAVE_EVP_CLEANUP
 	EVP_cleanup();
 #  endif
+#  if (OPENSSL_VERSION_NUMBER < 0x10100000) && !defined(OPENSSL_NO_ENGINE) && defined(HAVE_ENGINE_CLEANUP)
 	ENGINE_cleanup();
+#  endif
 	CONF_modules_free();
 #  endif
 #  ifdef HAVE_CRYPTO_CLEANUP_ALL_EX_DATA

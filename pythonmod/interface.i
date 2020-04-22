@@ -1,19 +1,40 @@
 /*
  * interface.i: unbound python module
  */
+%begin %{
+/* store state of warning output, restored at later pop */
+#pragma GCC diagnostic push
+/* ignore warnings for pragma below, where for older GCC it can produce a
+   warning if the cast-function-type warning is absent. */
+#pragma GCC diagnostic ignored "-Wpragmas"
+/* ignore gcc8 METH_NOARGS function cast warnings for swig function pointers */
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+%}
 %module unboundmodule
 %{
+/* restore state of warning output, remove the functioncast ignore */
+#pragma GCC diagnostic pop
 /**
  * \file
  * This is the interface between the unbound server and a python module
  * called to perform operations on queries.
  */
    #include <sys/types.h>
+   #ifdef HAVE_SYS_SOCKET_H
    #include <sys/socket.h>
+   #endif
+   #ifdef HAVE_NETINET_IN_H
    #include <netinet/in.h>
+   #endif
+   #ifdef HAVE_ARPA_INET_H
    #include <arpa/inet.h>
+   #endif
+   #ifdef HAVE_NETDB_H
    #include <netdb.h>
+   #endif
+   #ifdef HAVE_SYS_UN_H
    #include <sys/un.h>
+   #endif
    #include <stdarg.h>
    #include "config.h"
    #include "util/log.h"
@@ -178,22 +199,17 @@ struct query_info {
 %extend query_info {
    %pythoncode %{
         def _get_qtype_str(self): return sldns_wire2str_type(self.qtype)
-        __swig_getmethods__["qtype_str"] = _get_qtype_str
-        if _newclass:qtype_str = _swig_property(_get_qtype_str)
+        qtype_str = property(_get_qtype_str)
 
         def _get_qclass_str(self): return sldns_wire2str_class(self.qclass)
-        __swig_getmethods__["qclass_str"] = _get_qclass_str
-        if _newclass:qclass_str = _swig_property(_get_qclass_str)
+        qclass_str = property(_get_qclass_str)
 
-        __swig_getmethods__["qname"] = _unboundmodule._get_qname
-        if _newclass:qname = _swig_property(_unboundmodule._get_qname)
+        qname = property(_unboundmodule._get_qname)
 
-        __swig_getmethods__["qname_list"] = _unboundmodule._get_qname_components
-        if _newclass:qname_list = _swig_property(_unboundmodule._get_qname_components)
+        qname_list = property(_unboundmodule._get_qname_components)
 
         def _get_qname_str(self): return dnameAsStr(self.qname)
-        __swig_getmethods__["qname_str"] = _get_qname_str
-        if _newclass:qname_str = _swig_property(_get_qname_str)
+        qname_str = property(_get_qname_str)
    %}
 }
 
@@ -233,22 +249,17 @@ uint16_t ntohs(uint16_t netshort);
 %extend packed_rrset_key {
    %pythoncode %{
         def _get_type_str(self): return sldns_wire2str_type(_unboundmodule.ntohs(self.type))
-        __swig_getmethods__["type_str"] = _get_type_str
-        if _newclass:type_str = _swig_property(_get_type_str)
+        type_str = property(_get_type_str)
 
         def _get_class_str(self): return sldns_wire2str_class(_unboundmodule.ntohs(self.rrset_class))
-        __swig_getmethods__["rrset_class_str"] = _get_class_str
-        if _newclass:rrset_class_str = _swig_property(_get_class_str)
+        rrset_class_str = property(_get_class_str)
 
-        __swig_getmethods__["dname"] = _unboundmodule._get_dname
-        if _newclass:dname = _swig_property(_unboundmodule._get_dname)
+        dname = property(_unboundmodule._get_dname)
 
-        __swig_getmethods__["dname_list"] = _unboundmodule._get_dname_components
-        if _newclass:dname_list = _swig_property(_unboundmodule._get_dname_components)
+        dname_list = property(_unboundmodule._get_dname_components)
 
         def _get_dname_str(self): return dnameAsStr(self.dname)
-        __swig_getmethods__["dname_str"] = _get_dname_str
-        if _newclass:dname_str = _swig_property(_get_dname_str)
+        dname_str = property(_get_dname_str)
    %}
 }
 
@@ -346,14 +357,11 @@ struct packed_rrset_data {
 %extend packed_rrset_data {
    %pythoncode %{
         def _get_data_rr_len(self): return RRSetData_RRLen(self)
-        __swig_getmethods__["rr_len"] = _get_data_rr_len
-        if _newclass:rr_len = _swig_property(_get_data_rr_len)
+        rr_len = property(_get_data_rr_len)
         def _get_data_rr_ttl(self): return RRSetData_RRTTL(self)
-        __swig_getmethods__["rr_ttl"] =_get_data_rr_ttl
-        if _newclass:rr_len = _swig_property(_get_data_rr_ttl)
+        rr_ttl = property(_get_data_rr_ttl)
         def _get_data_rr_data(self): return RRSetData_RRData(self)
-        __swig_getmethods__["rr_data"] = _get_data_rr_data
-        if _newclass:rr_len = _swig_property(_get_data_rr_data)
+        rr_data = property(_get_data_rr_data)
    %}
 }
 
@@ -425,12 +433,10 @@ struct dns_msg {
 %extend reply_info {
    %pythoncode %{
         def _rrset_ref_get(self): return ReplyInfo_Ref(self)
-        __swig_getmethods__["ref"] = _rrset_ref_get
-        if _newclass:ref = _swig_property(_rrset_ref_get)
+        ref = property(_rrset_ref_get)
 
         def _rrset_rrsets_get(self): return ReplyInfo_RRSet(self)
-        __swig_getmethods__["rrsets"] = _rrset_rrsets_get
-        if _newclass:rrsets = _swig_property(_rrset_rrsets_get)
+        rrsets = property(_rrset_rrsets_get)
    %}
 }
 
@@ -449,7 +455,9 @@ struct sockaddr_storage {};
         switch (ss->ss_family) {
         case AF_INET:  return sizeof(struct sockaddr_in);
         case AF_INET6: return sizeof(struct sockaddr_in6);
+#ifdef HAVE_SYS_UN_H
         case AF_UNIX:  return sizeof(struct sockaddr_un);
+#endif
         default:
             return 0;
         }
@@ -515,10 +523,12 @@ struct sockaddr_storage {};
             return PyBytes_FromStringAndSize((const char *)raw, sizeof(*raw));
         }
 
+#ifdef HAVE_SYS_UN_H
         if (ss->ss_family == AF_UNIX) {
             const struct sockaddr_un *sa = (struct sockaddr_un *)ss;
             return PyBytes_FromString(sa->sun_path);
         }
+#endif
 
         return Py_None;
     }
@@ -567,28 +577,22 @@ struct sockaddr_storage {};
 %extend sockaddr_storage {
    %pythoncode %{
         def _family_get(self): return _sockaddr_storage_family(self)
-        __swig_getmethods__["family"] = _family_get
-        if _newclass: family = _swig_property(_family_get)
+        family = property(_family_get)
 
         def _addr_get(self): return _sockaddr_storage_addr(self)
-        __swig_getmethods__["addr"] = _addr_get
-        if _newclass: addr = _swig_property(_addr_get)
+        addr = property(_addr_get)
 
         def _raw_addr_get(self): return _sockaddr_storage_raw_addr(self)
-        __swig_getmethods__["raw_addr"] = _raw_addr_get
-        if _newclass: raw_addr = _swig_property(_raw_addr_get)
+        raw_addr = property(_raw_addr_get)
 
         def _port_get(self): return _sockaddr_storage_port(self)
-        __swig_getmethods__["port"] = _port_get
-        if _newclass: port = _swig_property(_port_get)
+        port = property(_port_get)
 
         def _flowinfo_get(self): return _sockaddr_storage_flowinfo(self)
-        __swig_getmethods__["flowinfo"] = _flowinfo_get
-        if _newclass: flowinfo = _swig_property(_flowinfo_get)
+        flowinfo = property(_flowinfo_get)
 
         def _scope_id_get(self): return _sockaddr_storage_scope_id(self)
-        __swig_getmethods__["scope_id"] = _scope_id_get
-        if _newclass: scope_id = _swig_property(_scope_id_get)
+        scope_id = property(_scope_id_get)
    %}
 }
 
@@ -612,16 +616,13 @@ struct comm_reply {
 %extend comm_reply {
    %pythoncode %{
         def _addr_get(self): return _sockaddr_storage_addr(self._addr)
-        __swig_getmethods__["addr"] = _addr_get
-        if _newclass:addr = _swig_property(_addr_get)
+        addr = property(_addr_get)
 
         def _port_get(self): return _sockaddr_storage_port(self._addr)
-        __swig_getmethods__["port"] = _port_get
-        if _newclass:port = _swig_property(_port_get)
+        port = property(_port_get)
 
         def _family_get(self): return _sockaddr_storage_family(self._addr)
-        __swig_getmethods__["family"] = _family_get
-        if _newclass:family = _swig_property(_family_get)
+        family = property(_family_get)
    %}
 }
 
@@ -656,12 +657,10 @@ struct edns_option {
 %extend edns_option {
     %pythoncode %{
         def _opt_code_get(self): return _edns_option_opt_code_get(self)
-        __swig_getmethods__["code"] = _opt_code_get
-        if _newclass: opt_code = _swig_property(_opt_code_get)
+        code = property(_opt_code_get)
 
         def _opt_data_get(self): return _edns_option_opt_data_get(self)
-        __swig_getmethods__["data"] = _opt_data_get
-        if _newclass: opt_data = _swig_property(_opt_data_get)
+        data = property(_opt_data_get)
     %}
 }
 
@@ -688,11 +687,9 @@ struct edns_data {
 %extend edns_data {
     %pythoncode %{
         def _opt_list_iter(self): return EdnsOptsListIter(self.opt_list)
-        __swig_getmethods__["opt_list_iter"] = _opt_list_iter
-        if _newclass:opt_list_iter = _swig_property(_opt_list_iter)
+        opt_list_iter = property(_opt_list_iter)
         def _opt_list(self): return _edns_data_opt_list_get(self)
-        __swig_getmethods__["opt_list"] = _opt_list
-        if _newclass:opt_list = _swig_property(_opt_list)
+        opt_list = property(_opt_list)
     %}
 }
 
@@ -893,34 +890,25 @@ struct module_qstate {
             _unboundmodule._ext_state_set(self, id, state)
 
         def __ext_state_get(self): return ExtState(self)
-        __swig_getmethods__["ext_state"] = __ext_state_get
-        if _newclass:ext_state = _swig_property(__ext_state_get)#, __ext_state_set)
+        ext_state = property(__ext_state_get) #, __ext_state_set
 
         def _edns_opts_front_in_iter(self): return EdnsOptsListIter(self.edns_opts_front_in)
-        __swig_getmethods__["edns_opts_front_in_iter"] = _edns_opts_front_in_iter
-        if _newclass:edns_opts_front_in_iter = _swig_property(_edns_opts_front_in_iter)
+        edns_opts_front_in_iter = property(_edns_opts_front_in_iter)
         def _edns_opts_back_out_iter(self): return EdnsOptsListIter(self.edns_opts_back_out)
-        __swig_getmethods__["edns_opts_back_out_iter"] = _edns_opts_back_out_iter
-        if _newclass:edns_opts_back_out_iter = _swig_property(_edns_opts_back_out_iter)
+        edns_opts_back_out_iter = property(_edns_opts_back_out_iter)
         def _edns_opts_back_in_iter(self): return EdnsOptsListIter(self.edns_opts_back_in)
-        __swig_getmethods__["edns_opts_back_in_iter"] = _edns_opts_back_in_iter
-        if _newclass:edns_opts_back_in_iter = _swig_property(_edns_opts_back_in_iter)
+        edns_opts_back_in_iter = property(_edns_opts_back_in_iter)
         def _edns_opts_front_out_iter(self): return EdnsOptsListIter(self.edns_opts_front_out)
-        __swig_getmethods__["edns_opts_front_out_iter"] = _edns_opts_front_out_iter
-        if _newclass:edns_opts_front_out_iter = _swig_property(_edns_opts_front_out_iter)
+        edns_opts_front_out_iter = property(_edns_opts_front_out_iter)
 
         def _edns_opts_front_in(self): return _edns_opts_front_in_get(self)
-        __swig_getmethods__["edns_opts_front_in"] = _edns_opts_front_in
-        if _newclass:edns_opts_front_in = _swig_property(_edns_opts_front_in)
+        edns_opts_front_in = property(_edns_opts_front_in)
         def _edns_opts_back_out(self): return _edns_opts_back_out_get(self)
-        __swig_getmethods__["edns_opts_back_out"] = _edns_opts_back_out
-        if _newclass:edns_opts_back_out = _swig_property(_edns_opts_back_out)
+        edns_opts_back_out = property(_edns_opts_back_out)
         def _edns_opts_back_in(self): return _edns_opts_back_in_get(self)
-        __swig_getmethods__["edns_opts_back_in"] = _edns_opts_back_in
-        if _newclass:edns_opts_back_in = _swig_property(_edns_opts_back_in)
+        edns_opts_back_in = property(_edns_opts_back_in)
         def _edns_opts_front_out(self): return _edns_opts_front_out_get(self)
-        __swig_getmethods__["edns_opts_front_out"] = _edns_opts_front_out
-        if _newclass:edns_opts_front_out = _swig_property(_edns_opts_front_out)
+        edns_opts_front_out = property(_edns_opts_front_out)
    %}
 }
 
@@ -1026,7 +1014,7 @@ struct config_file {
    char* control_key_file;
    char* control_cert_file;
    int do_daemonize;
-   char* python_script;
+   struct config_strlist* python_script;
 };
 
 /* ************************************************************************************ *
@@ -1090,35 +1078,28 @@ struct delegpt {
 
 %extend delegpt {
    %pythoncode %{
-        __swig_getmethods__["dname"] = _unboundmodule._get_dp_dname
-        if _newclass:dname = _swig_property(_unboundmodule._get_dp_dname)
+        dname = property(_unboundmodule._get_dp_dname)
 
-        __swig_getmethods__["dname_list"] = _unboundmodule._get_dp_dname_components
-        if _newclass:dname_list = _swig_property(_unboundmodule._get_dp_dname_components)
+        dname_list = property(_unboundmodule._get_dp_dname_components)
 
         def _get_dname_str(self): return dnameAsStr(self.dname)
-        __swig_getmethods__["dname_str"] = _get_dname_str
-        if _newclass:dname_str = _swig_property(_get_dname_str)
+        dname_str = property(_get_dname_str)
    %}
 }
 %extend delegpt_ns {
    %pythoncode %{
-        __swig_getmethods__["dname"] = _unboundmodule._get_dpns_dname
-        if _newclass:dname = _swig_property(_unboundmodule._get_dpns_dname)
+        dname = property(_unboundmodule._get_dpns_dname)
 
-        __swig_getmethods__["dname_list"] = _unboundmodule._get_dpns_dname_components
-        if _newclass:dname_list = _swig_property(_unboundmodule._get_dpns_dname_components)
+        dname_list = property(_unboundmodule._get_dpns_dname_components)
 
         def _get_dname_str(self): return dnameAsStr(self.dname)
-        __swig_getmethods__["dname_str"] = _get_dname_str
-        if _newclass:dname_str = _swig_property(_get_dname_str)
+        dname_str = property(_get_dname_str)
    %}
 }
 %extend delegpt_addr {
    %pythoncode %{
         def _addr_get(self): return _delegpt_addr_addr_get(self)
-        __swig_getmethods__["addr"] = _addr_get
-        if _newclass:addr = _swig_property(_addr_get)
+        addr = property(_addr_get)
    %}
 }
 
@@ -1128,6 +1109,7 @@ struct delegpt {
 %rename ("MODULE_STATE_INITIAL") "module_state_initial";
 %rename ("MODULE_WAIT_REPLY") "module_wait_reply";
 %rename ("MODULE_WAIT_MODULE") "module_wait_module";
+%rename ("MODULE_RESTART_NEXT") "module_restart_next";
 %rename ("MODULE_WAIT_SUBQUERY") "module_wait_subquery";
 %rename ("MODULE_ERROR") "module_error";
 %rename ("MODULE_FINISHED") "module_finished";
@@ -1136,6 +1118,7 @@ enum module_ext_state {
    module_state_initial = 0,
    module_wait_reply,
    module_wait_module,
+   module_restart_next,
    module_wait_subquery,
    module_error,
    module_finished

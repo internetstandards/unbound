@@ -179,9 +179,10 @@ int
 create_udp_sock(int family, int socktype, struct sockaddr* addr,
         socklen_t addrlen, int v6only, int* inuse, int* noproto,
 	int rcv, int snd, int listen, int* reuseport, int transparent,
-	int freebind, int use_systemd)
+	int freebind, int use_systemd, int dscp)
 {
 	int s;
+	char* err;
 #if defined(SO_REUSEADDR) || defined(SO_REUSEPORT) || defined(IPV6_USE_MIN_MTU)  || defined(IP_TRANSPARENT) || defined(IP_BINDANY) || defined(IP_FREEBIND) || defined (SO_BINDANY)
 	int on=1;
 #endif
@@ -451,6 +452,9 @@ create_udp_sock(int family, int socktype, struct sockaddr* addr,
 #  endif
 #endif /* SO_SNDBUF */
 	}
+	err = set_ip_dscp(s, family, dscp);
+	if(err != NULL)
+		log_warn("error setting IP DiffServ codepoint %d on UDP socket: %s", dscp, err);
 	if(family == AF_INET6) {
 # if defined(IPV6_V6ONLY)
 		if(v6only) {
@@ -638,9 +642,10 @@ create_udp_sock(int family, int socktype, struct sockaddr* addr,
 
 int
 create_tcp_accept_sock(struct addrinfo *addr, int v6only, int* noproto,
-	int* reuseport, int transparent, int mss, int freebind, int use_systemd)
+	int* reuseport, int transparent, int mss, int freebind, int use_systemd, int dscp)
 {
 	int s;
+	char* err;
 #if defined(SO_REUSEADDR) || defined(SO_REUSEPORT) || defined(IPV6_V6ONLY) || defined(IP_TRANSPARENT) || defined(IP_BINDANY) || defined(IP_FREEBIND) || defined(SO_BINDANY)
 	int on = 1;
 #endif
@@ -793,6 +798,9 @@ create_tcp_accept_sock(struct addrinfo *addr, int v6only, int* noproto,
 		strerror(errno));
 	}
 #endif /* IP_TRANSPARENT || IP_BINDANY || SO_BINDANY */
+	err = set_ip_dscp(s, addr->ai_family, dscp);
+	if(err != NULL)
+		log_warn("error setting IP DiffServ codepoint %d on TCP socket: %s", dscp, err);
 	if(
 #ifdef HAVE_SYSTEMD
 		!got_fd_from_systemd &&
@@ -851,17 +859,69 @@ create_tcp_accept_sock(struct addrinfo *addr, int v6only, int* noproto,
 #ifdef ENOPROTOOPT
 		/* squelch ENOPROTOOPT: freebsd server mode with kernel support
 		   disabled, except when verbosity enabled for debugging */
-		if(errno != ENOPROTOOPT || verbosity >= 3)
+		if(errno != ENOPROTOOPT || verbosity >= 3) {
 #endif
 		  if(errno == EPERM) {
 		  	log_warn("Setting TCP Fast Open as server failed: %s ; this could likely be because sysctl net.inet.tcp.fastopen.enabled, net.inet.tcp.fastopen.server_enable, or net.ipv4.tcp_fastopen is disabled", strerror(errno));
 		  } else {
 		  	log_err("Setting TCP Fast Open as server failed: %s", strerror(errno));
 		  }
+#ifdef ENOPROTOOPT
+		}
+#endif
 	}
 #endif
 	return s;
 }
+
+char*
+set_ip_dscp(int socket, int addrfamily, int dscp)
+{
+	int ds;
+
+	if(dscp == 0)
+		return NULL;
+	ds = dscp << 2;
+	switch(addrfamily) {
+	case AF_INET6:
+		if(setsockopt(socket, IPPROTO_IPV6, IPV6_TCLASS, &ds, sizeof(ds)) < 0)
+			return sock_strerror(errno);
+		break;
+	default:
+		if(setsockopt(socket, IPPROTO_IP, IP_TOS, &ds, sizeof(ds)) < 0)
+			return sock_strerror(errno);
+		break;
+	}
+	return NULL;
+}
+
+#  ifndef USE_WINSOCK
+char*
+sock_strerror(int errn)
+{
+	return strerror(errn);
+}
+
+void
+sock_close(int socket)
+{
+	close(socket);
+}
+
+#  else
+char*
+sock_strerror(int ATTR_UNUSED(errn))
+{
+	return wsa_strerror(WSAGetLastError());
+}
+
+void
+sock_close(int socket)
+{
+	closesocket(socket);
+}
+
+#  endif /* USE_WINSOCK */
 
 int
 create_local_accept_sock(const char *path, int* noproto, int use_systemd)
@@ -949,7 +1009,7 @@ err:
 static int
 make_sock(int stype, const char* ifname, const char* port, 
 	struct addrinfo *hints, int v6only, int* noip6, size_t rcv, size_t snd,
-	int* reuseport, int transparent, int tcp_mss, int freebind, int use_systemd)
+	int* reuseport, int transparent, int tcp_mss, int freebind, int use_systemd, int dscp)
 {
 	struct addrinfo *res = NULL;
 	int r, s, inuse, noproto;
@@ -977,7 +1037,7 @@ make_sock(int stype, const char* ifname, const char* port,
 		s = create_udp_sock(res->ai_family, res->ai_socktype,
 			(struct sockaddr*)res->ai_addr, res->ai_addrlen,
 			v6only, &inuse, &noproto, (int)rcv, (int)snd, 1,
-			reuseport, transparent, freebind, use_systemd);
+			reuseport, transparent, freebind, use_systemd, dscp);
 		if(s == -1 && inuse) {
 			log_err("bind: address already in use");
 		} else if(s == -1 && noproto && hints->ai_family == AF_INET6){
@@ -985,7 +1045,7 @@ make_sock(int stype, const char* ifname, const char* port,
 		}
 	} else	{
 		s = create_tcp_accept_sock(res, v6only, &noproto, reuseport,
-			transparent, tcp_mss, freebind, use_systemd);
+			transparent, tcp_mss, freebind, use_systemd, dscp);
 		if(s == -1 && noproto && hints->ai_family == AF_INET6){
 			*noip6 = 1;
 		}
@@ -998,7 +1058,7 @@ make_sock(int stype, const char* ifname, const char* port,
 static int
 make_sock_port(int stype, const char* ifname, const char* port, 
 	struct addrinfo *hints, int v6only, int* noip6, size_t rcv, size_t snd,
-	int* reuseport, int transparent, int tcp_mss, int freebind, int use_systemd)
+	int* reuseport, int transparent, int tcp_mss, int freebind, int use_systemd, int dscp)
 {
 	char* s = strchr(ifname, '@');
 	if(s) {
@@ -1020,10 +1080,10 @@ make_sock_port(int stype, const char* ifname, const char* port,
 		(void)strlcpy(p, s+1, sizeof(p));
 		p[strlen(s+1)]=0;
 		return make_sock(stype, newif, p, hints, v6only, noip6,
-			rcv, snd, reuseport, transparent, tcp_mss, freebind, use_systemd);
+			rcv, snd, reuseport, transparent, tcp_mss, freebind, use_systemd, dscp);
 	}
 	return make_sock(stype, ifname, port, hints, v6only, noip6, rcv, snd,
-		reuseport, transparent, tcp_mss, freebind, use_systemd);
+		reuseport, transparent, tcp_mss, freebind, use_systemd, dscp);
 }
 
 /**
@@ -1143,6 +1203,7 @@ if_is_ssl(const char* ifname, const char* port, int ssl_port,
  * @param freebind: set IP_FREEBIND socket option.
  * @param use_systemd: if true, fetch sockets from systemd.
  * @param dnscrypt_port: dnscrypt service port number
+ * @param dscp: DSCP to use.
  * @return: returns false on error.
  */
 static int
@@ -1151,7 +1212,7 @@ ports_create_if(const char* ifname, int do_auto, int do_udp, int do_tcp,
 	size_t rcv, size_t snd, int ssl_port,
 	struct config_strlist* tls_additional_port, int* reuseport,
 	int transparent, int tcp_mss, int freebind, int use_systemd,
-	int dnscrypt_port)
+	int dnscrypt_port, int dscp)
 {
 	int s, noip6=0;
 #ifdef USE_DNSCRYPT
@@ -1168,7 +1229,7 @@ ports_create_if(const char* ifname, int do_auto, int do_udp, int do_tcp,
 	if(do_auto) {
 		if((s = make_sock_port(SOCK_DGRAM, ifname, port, hints, 1, 
 			&noip6, rcv, snd, reuseport, transparent,
-			tcp_mss, freebind, use_systemd)) == -1) {
+			tcp_mss, freebind, use_systemd, dscp)) == -1) {
 			if(noip6) {
 				log_warn("IPv6 protocol not available");
 				return 1;
@@ -1197,7 +1258,7 @@ ports_create_if(const char* ifname, int do_auto, int do_udp, int do_tcp,
 		/* regular udp socket */
 		if((s = make_sock_port(SOCK_DGRAM, ifname, port, hints, 1, 
 			&noip6, rcv, snd, reuseport, transparent,
-			tcp_mss, freebind, use_systemd)) == -1) {
+			tcp_mss, freebind, use_systemd, dscp)) == -1) {
 			if(noip6) {
 				log_warn("IPv6 protocol not available");
 				return 1;
@@ -1219,7 +1280,7 @@ ports_create_if(const char* ifname, int do_auto, int do_udp, int do_tcp,
 			tls_additional_port);
 		if((s = make_sock_port(SOCK_STREAM, ifname, port, hints, 1, 
 			&noip6, 0, 0, reuseport, transparent, tcp_mss,
-			freebind, use_systemd)) == -1) {
+			freebind, use_systemd, dscp)) == -1) {
 			if(noip6) {
 				/*log_warn("IPv6 protocol not available");*/
 				return 1;
@@ -1418,7 +1479,7 @@ listening_ports_open(struct config_file* cfg, int* reuseport)
 				cfg->ssl_port, cfg->tls_additional_port,
 				reuseport, cfg->ip_transparent,
 				cfg->tcp_mss, cfg->ip_freebind, cfg->use_systemd,
-				cfg->dnscrypt_port)) {
+				cfg->dnscrypt_port, cfg->ip_dscp)) {
 				listening_ports_free(list);
 				return NULL;
 			}
@@ -1432,7 +1493,7 @@ listening_ports_open(struct config_file* cfg, int* reuseport)
 				cfg->ssl_port, cfg->tls_additional_port,
 				reuseport, cfg->ip_transparent,
 				cfg->tcp_mss, cfg->ip_freebind, cfg->use_systemd,
-				cfg->dnscrypt_port)) {
+				cfg->dnscrypt_port, cfg->ip_dscp)) {
 				listening_ports_free(list);
 				return NULL;
 			}
@@ -1448,7 +1509,7 @@ listening_ports_open(struct config_file* cfg, int* reuseport)
 				cfg->ssl_port, cfg->tls_additional_port,
 				reuseport, cfg->ip_transparent,
 				cfg->tcp_mss, cfg->ip_freebind, cfg->use_systemd,
-				cfg->dnscrypt_port)) {
+				cfg->dnscrypt_port, cfg->ip_dscp)) {
 				listening_ports_free(list);
 				return NULL;
 			}
@@ -1462,7 +1523,7 @@ listening_ports_open(struct config_file* cfg, int* reuseport)
 				cfg->ssl_port, cfg->tls_additional_port,
 				reuseport, cfg->ip_transparent,
 				cfg->tcp_mss, cfg->ip_freebind, cfg->use_systemd,
-				cfg->dnscrypt_port)) {
+				cfg->dnscrypt_port, cfg->ip_dscp)) {
 				listening_ports_free(list);
 				return NULL;
 			}
@@ -1636,10 +1697,12 @@ tcp_req_info_setup_listen(struct tcp_req_info* req)
 	
 	if(wr) {
 		req->cp->tcp_is_reading = 0;
+		comm_point_stop_listening(req->cp);
 		comm_point_start_listening(req->cp, -1,
 			req->cp->tcp_timeout_msec);
 	} else if(rd) {
 		req->cp->tcp_is_reading = 1;
+		comm_point_stop_listening(req->cp);
 		comm_point_start_listening(req->cp, -1,
 			req->cp->tcp_timeout_msec);
 		/* and also read it (from SSL stack buffers), so
@@ -1647,6 +1710,7 @@ tcp_req_info_setup_listen(struct tcp_req_info* req)
 		 * the TLS frame is sitting in the buffers. */
 		req->read_again = 1;
 	} else {
+		comm_point_stop_listening(req->cp);
 		comm_point_start_listening(req->cp, -1,
 			req->cp->tcp_timeout_msec);
 		comm_point_listen_for_rw(req->cp, 0, 0);
@@ -1746,6 +1810,7 @@ tcp_req_info_handle_readdone(struct tcp_req_info* req)
 	req->is_drop = 0;
 	req->is_reply = 0;
 	req->in_worker_handle = 1;
+	sldns_buffer_set_limit(req->spool_buffer, 0);
 	/* handle the current request */
 	/* this calls the worker handle request routine that could give
 	 * a cache response, or localdata response, or drop the reply,
@@ -1759,6 +1824,7 @@ tcp_req_info_handle_readdone(struct tcp_req_info* req)
 		 * clear to write to */
 	send_it:
 		c->tcp_is_reading = 0;
+		comm_point_stop_listening(c);
 		comm_point_start_listening(c, -1, c->tcp_timeout_msec);
 		return;
 	}
@@ -1767,13 +1833,7 @@ tcp_req_info_handle_readdone(struct tcp_req_info* req)
 	 * If mesh failed to add a new entry and called commpoint_drop_reply. 
 	 * Then the mesh state has been cleared. */
 	if(req->is_drop) {
-		/* we can now call drop_reply without recursing into ourselves
-		 * whilst in the callback */
-		/* we have to close the stream because there is no reply,
-		 * no servfail to send, but the query needs an action, for
-		 * a stream that is close the connection */
-		sldns_buffer_clear(c->buffer);
-		comm_point_drop_reply(&c->repinfo);
+		/* the reply has been dropped, stream has been closed. */
 		return;
 	}
 	/* If mesh failed(mallocfail) and called commpoint_send_reply with
@@ -1857,7 +1917,14 @@ void
 tcp_req_info_send_reply(struct tcp_req_info* req)
 {
 	if(req->in_worker_handle) {
-		/* It is in the right buffer to answer straight away */
+		/* reply from mesh is in the spool_buffer */
+		/* copy now, so that the spool buffer is free for other tasks
+		 * before the callback is done */
+		sldns_buffer_clear(req->cp->buffer);
+		sldns_buffer_write(req->cp->buffer,
+			sldns_buffer_begin(req->spool_buffer),
+			sldns_buffer_limit(req->spool_buffer));
+		sldns_buffer_flip(req->cp->buffer);
 		req->is_reply = 1;
 		return;
 	}

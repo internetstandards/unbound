@@ -205,18 +205,25 @@ pick_outgoing_tcp(struct waiting_tcp* w, int s)
 /** get TCP file descriptor for address, returns -1 on failure,
  * tcp_mss is 0 or maxseg size to set for TCP packets. */
 int
-outnet_get_tcp_fd(struct sockaddr_storage* addr, socklen_t addrlen, int tcp_mss)
+outnet_get_tcp_fd(struct sockaddr_storage* addr, socklen_t addrlen, int tcp_mss, int dscp)
 {
 	int s;
+	int af;
+	char* err;
 #ifdef SO_REUSEADDR
 	int on = 1;
 #endif
 #ifdef INET6
-	if(addr_is_ip6(addr, addrlen))
+	if(addr_is_ip6(addr, addrlen)){
 		s = socket(PF_INET6, SOCK_STREAM, IPPROTO_TCP);
-	else
+		af = AF_INET6;
+	} else {
+#else
+	{
 #endif
+		af = AF_INET;
 		s = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+	}
 	if(s == -1) {
 #ifndef USE_WINSOCK
 		log_err_addr("outgoing tcp: socket", strerror(errno),
@@ -235,6 +242,12 @@ outnet_get_tcp_fd(struct sockaddr_storage* addr, socklen_t addrlen, int tcp_mss)
 			" setsockopt(.. SO_REUSEADDR ..) failed");
 	}
 #endif
+
+	err = set_ip_dscp(s, af, dscp);
+	if(err != NULL) {
+		verbose(VERB_ALGO, "outgoing tcp:"
+			"error setting IP DiffServ codepoint on socket");
+	}
 
 	if(tcp_mss > 0) {
 #if defined(IPPROTO_TCP) && defined(TCP_MAXSEG)
@@ -291,7 +304,10 @@ outnet_tcp_take_into_use(struct waiting_tcp* w, uint8_t* pkt, size_t pkt_len)
 	log_assert(pkt);
 	log_assert(w->addrlen > 0);
 	/* open socket */
-	s = outnet_get_tcp_fd(&w->addr, w->addrlen, w->outnet->tcp_mss);
+	s = outnet_get_tcp_fd(&w->addr, w->addrlen, w->outnet->tcp_mss, w->outnet->ip_dscp);
+
+	if(s == -1)
+		return 0;
 
 	if(!pick_outgoing_tcp(w, s))
 		return 0;
@@ -364,47 +380,22 @@ outnet_tcp_take_into_use(struct waiting_tcp* w, uint8_t* pkt, size_t pkt_len)
 			comm_point_close(pend->c);
 			return 0;
 		}
+		verbose(VERB_ALGO, "the query is using TLS encryption, for %s",
+			(w->tls_auth_name?w->tls_auth_name:"an unauthenticated connection"));
 #ifdef USE_WINSOCK
 		comm_point_tcp_win_bio_cb(pend->c, pend->c->ssl);
 #endif
 		pend->c->ssl_shake_state = comm_ssl_shake_write;
-		if(w->tls_auth_name) {
+		if(!set_auth_name_on_ssl(pend->c->ssl, w->tls_auth_name,
+			w->outnet->tls_use_sni)) {
+			pend->c->fd = s;
 #ifdef HAVE_SSL
-			(void)SSL_set_tlsext_host_name(pend->c->ssl, w->tls_auth_name);
+			SSL_free(pend->c->ssl);
 #endif
+			pend->c->ssl = NULL;
+			comm_point_close(pend->c);
+			return 0;
 		}
-#ifdef HAVE_SSL_SET1_HOST
-		if(w->tls_auth_name) {
-			SSL_set_verify(pend->c->ssl, SSL_VERIFY_PEER, NULL);
-			/* setting the hostname makes openssl verify the
-                         * host name in the x509 certificate in the
-                         * SSL connection*/
-                        if(!SSL_set1_host(pend->c->ssl, w->tls_auth_name)) {
-                                log_err("SSL_set1_host failed");
-				pend->c->fd = s;
-				SSL_free(pend->c->ssl);
-				pend->c->ssl = NULL;
-				comm_point_close(pend->c);
-				return 0;
-			}
-		}
-#elif defined(HAVE_X509_VERIFY_PARAM_SET1_HOST)
-		/* openssl 1.0.2 has this function that can be used for
-		 * set1_host like verification */
-		if(w->tls_auth_name) {
-			X509_VERIFY_PARAM* param = SSL_get0_param(pend->c->ssl);
-			X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-			if(!X509_VERIFY_PARAM_set1_host(param, w->tls_auth_name, strlen(w->tls_auth_name))) {
-				log_err("X509_VERIFY_PARAM_set1_host failed");
-				pend->c->fd = s;
-				SSL_free(pend->c->ssl);
-				pend->c->ssl = NULL;
-				comm_point_close(pend->c);
-				return 0;
-			}
-			SSL_set_verify(pend->c->ssl, SSL_VERIFY_PEER, NULL);
-		}
-#endif /* HAVE_SSL_SET1_HOST */
 	}
 	w->pkt = NULL;
 	w->next_waiting = (void*)pend;
@@ -505,7 +496,9 @@ portcomm_loweruse(struct outside_network* outnet, struct port_comm* pc)
 	comm_point_close(pc->cp);
 	pif = pc->pif;
 	log_assert(pif->inuse > 0);
+#ifndef DISABLE_EXPLICIT_PORT_RANDOMISATION
 	pif->avail_ports[pif->avail_total - pif->inuse] = pc->number;
+#endif
 	pif->inuse--;
 	pif->out[pc->index] = pif->out[pif->inuse];
 	pif->out[pc->index]->index = pc->index;
@@ -718,10 +711,12 @@ create_pending_tcp(struct outside_network* outnet, size_t bufsize)
 static int setup_if(struct port_if* pif, const char* addrstr, 
 	int* avail, int numavail, size_t numfd)
 {
+#ifndef DISABLE_EXPLICIT_PORT_RANDOMISATION
 	pif->avail_total = numavail;
 	pif->avail_ports = (int*)memdup(avail, (size_t)numavail*sizeof(int));
 	if(!pif->avail_ports)
 		return 0;
+#endif
 	if(!ipstrtoaddr(addrstr, UNBOUND_DNS_PORT, &pif->addr, &pif->addrlen) &&
 	   !netblockstrtoaddr(addrstr, UNBOUND_DNS_PORT,
 			      &pif->addr, &pif->addrlen, &pif->pfxlen))
@@ -738,11 +733,11 @@ static int setup_if(struct port_if* pif, const char* addrstr,
 struct outside_network* 
 outside_network_create(struct comm_base *base, size_t bufsize, 
 	size_t num_ports, char** ifs, int num_ifs, int do_ip4, 
-	int do_ip6, size_t num_tcp, struct infra_cache* infra,
+	int do_ip6, size_t num_tcp, int dscp, struct infra_cache* infra,
 	struct ub_randstate* rnd, int use_caps_for_id, int* availports, 
 	int numavailports, size_t unwanted_threshold, int tcp_mss,
 	void (*unwanted_action)(void*), void* unwanted_param, int do_udp,
-	void* sslctx, int delayclose, struct dt_env* dtenv)
+	void* sslctx, int delayclose, int tls_use_sni, struct dt_env* dtenv)
 {
 	struct outside_network* outnet = (struct outside_network*)
 		calloc(1, sizeof(struct outside_network));
@@ -758,6 +753,7 @@ outside_network_create(struct comm_base *base, size_t bufsize,
 	outnet->infra = infra;
 	outnet->rnd = rnd;
 	outnet->sslctx = sslctx;
+	outnet->tls_use_sni = tls_use_sni;
 #ifdef USE_DNSTAP
 	outnet->dtenv = dtenv;
 #else
@@ -771,6 +767,7 @@ outside_network_create(struct comm_base *base, size_t bufsize,
 	outnet->use_caps_for_id = use_caps_for_id;
 	outnet->do_udp = do_udp;
 	outnet->tcp_mss = tcp_mss;
+	outnet->ip_dscp = dscp;
 #ifndef S_SPLINT_S
 	if(delayclose) {
 		outnet->delayclose = 1;
@@ -948,7 +945,9 @@ outside_network_delete(struct outside_network* outnet)
 				comm_point_delete(pc->cp);
 				free(pc);
 			}
+#ifndef DISABLE_EXPLICIT_PORT_RANDOMISATION
 			free(outnet->ip4_ifs[i].avail_ports);
+#endif
 			free(outnet->ip4_ifs[i].out);
 		}
 		free(outnet->ip4_ifs);
@@ -962,7 +961,9 @@ outside_network_delete(struct outside_network* outnet)
 				comm_point_delete(pc->cp);
 				free(pc);
 			}
+#ifndef DISABLE_EXPLICIT_PORT_RANDOMISATION
 			free(outnet->ip6_ifs[i].avail_ports);
+#endif
 			free(outnet->ip6_ifs[i].out);
 		}
 		free(outnet->ip6_ifs);
@@ -1052,11 +1053,12 @@ sai6_putrandom(struct sockaddr_in6 *sa, int pfxlen, struct ub_randstate *rnd)
  * @param port: port override for addr.
  * @param inuse: if -1 is returned, this bool means the port was in use.
  * @param rnd: random state (for address randomisation).
+ * @param dscp: DSCP to use.
  * @return fd or -1
  */
 static int
 udp_sockport(struct sockaddr_storage* addr, socklen_t addrlen, int pfxlen,
-	int port, int* inuse, struct ub_randstate* rnd)
+	int port, int* inuse, struct ub_randstate* rnd, int dscp)
 {
 	int fd, noproto;
 	if(addr_is_ip6(addr, addrlen)) {
@@ -1071,13 +1073,13 @@ udp_sockport(struct sockaddr_storage* addr, socklen_t addrlen, int pfxlen,
 		}
 		fd = create_udp_sock(AF_INET6, SOCK_DGRAM, 
 			(struct sockaddr*)&sa, addrlen, 1, inuse, &noproto,
-			0, 0, 0, NULL, 0, freebind, 0);
+			0, 0, 0, NULL, 0, freebind, 0, dscp);
 	} else {
 		struct sockaddr_in* sa = (struct sockaddr_in*)addr;
 		sa->sin_port = (in_port_t)htons((uint16_t)port);
 		fd = create_udp_sock(AF_INET, SOCK_DGRAM, 
 			(struct sockaddr*)addr, addrlen, 1, inuse, &noproto,
-			0, 0, 0, NULL, 0, 0, 0);
+			0, 0, 0, NULL, 0, 0, 0, dscp);
 	}
 	return fd;
 }
@@ -1126,6 +1128,7 @@ select_ifport(struct outside_network* outnet, struct pending* pend,
 	while(1) {
 		my_if = ub_random_max(outnet->rnd, num_if);
 		pif = &ifs[my_if];
+#ifndef DISABLE_EXPLICIT_PORT_RANDOMISATION
 		my_port = ub_random_max(outnet->rnd, pif->avail_total);
 		if(my_port < pif->inuse) {
 			/* port already open */
@@ -1137,8 +1140,11 @@ select_ifport(struct outside_network* outnet, struct pending* pend,
 		/* try to open new port, if fails, loop to try again */
 		log_assert(pif->inuse < pif->maxout);
 		portno = pif->avail_ports[my_port - pif->inuse];
+#else
+		my_port = portno = 0;
+#endif
 		fd = udp_sockport(&pif->addr, pif->addrlen, pif->pfxlen,
-			portno, &inuse, outnet->rnd);
+			portno, &inuse, outnet->rnd, outnet->ip_dscp);
 		if(fd == -1 && !inuse) {
 			/* nonrecoverable error making socket */
 			return 0;
@@ -1160,8 +1166,10 @@ select_ifport(struct outside_network* outnet, struct pending* pend,
 
 			/* grab port in interface */
 			pif->out[pif->inuse] = pend->pc;
+#ifndef DISABLE_EXPLICIT_PORT_RANDOMISATION
 			pif->avail_ports[my_port - pif->inuse] =
 				pif->avail_ports[pif->avail_total-pif->inuse-1];
+#endif
 			pif->inuse++;
 			break;
 		}
@@ -1964,11 +1972,9 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 	struct serviced_query* sq = (struct serviced_query*)arg;
 	struct outside_network* outnet = sq->outnet;
 	struct timeval now = *sq->outnet->now_tv;
-	int fallback_tcp = 0;
 
 	sq->pending = NULL; /* removed after callback */
 	if(error == NETEVENT_TIMEOUT) {
-		int rto = 0;
 		if(sq->status == serviced_query_UDP_EDNS && sq->last_rtt < 5000) {
 			/* fallback to 1480/1280 */
 			sq->status = serviced_query_UDP_EDNS_FRAG;
@@ -1984,9 +1990,9 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 			sq->status = serviced_query_UDP_EDNS;
 		}
 		sq->retry++;
-		if(!(rto=infra_rtt_update(outnet->infra, &sq->addr, sq->addrlen,
+		if(!infra_rtt_update(outnet->infra, &sq->addr, sq->addrlen,
 			sq->zone, sq->zonelen, sq->qtype, -1, sq->last_rtt,
-			(time_t)now.tv_sec)))
+			(time_t)now.tv_sec))
 			log_err("out of memory in UDP exponential backoff");
 		if(sq->retry < OUTBOUND_UDP_RETRY) {
 			log_name_addr(VERB_ALGO, "retry query", sq->qbuf+10,
@@ -1996,14 +2002,8 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 			}
 			return 0;
 		}
-		if(rto >= RTT_MAX_TIMEOUT) {
-			/* fallback_tcp = 1; */
-			/* UDP does not work, fallback to TCP below */
-		} else {
-			serviced_callbacks(sq, NETEVENT_TIMEOUT, c, rep);
-			return 0;
-		}
-	} else if(error != NETEVENT_NOERROR) {
+	}
+	if(error != NETEVENT_NOERROR) {
 		/* udp returns error (due to no ID or interface available) */
 		serviced_callbacks(sq, error, c, rep);
 		return 0;
@@ -2016,9 +2016,8 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 		sq->zone, sq->zonelen, sq->qbuf, sq->qbuflen,
 		&sq->last_sent_time, sq->outnet->now_tv, c->buffer);
 #endif
-	if(!fallback_tcp) {
-	    if( (sq->status == serviced_query_UDP_EDNS 
-	        ||sq->status == serviced_query_UDP_EDNS_FRAG)
+	if( (sq->status == serviced_query_UDP_EDNS 
+		||sq->status == serviced_query_UDP_EDNS_FRAG)
 		&& (LDNS_RCODE_WIRE(sldns_buffer_begin(c->buffer)) 
 			== LDNS_RCODE_FORMERR || LDNS_RCODE_WIRE(
 			sldns_buffer_begin(c->buffer)) == LDNS_RCODE_NOTIMPL
@@ -2032,7 +2031,7 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 			serviced_callbacks(sq, NETEVENT_CLOSED, c, rep);
 		}
 		return 0;
-	    } else if(sq->status == serviced_query_UDP_EDNS && 
+	} else if(sq->status == serviced_query_UDP_EDNS && 
 		!sq->edns_lame_known) {
 		/* now we know that edns queries received answers store that */
 		log_addr(VERB_ALGO, "serviced query: EDNS works for",
@@ -2042,7 +2041,7 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 			log_err("Out of memory caching edns works");
 		}
 		sq->edns_lame_known = 1;
-	    } else if(sq->status == serviced_query_UDP_EDNS_fallback &&
+	} else if(sq->status == serviced_query_UDP_EDNS_fallback &&
 		!sq->edns_lame_known && (LDNS_RCODE_WIRE(
 		sldns_buffer_begin(c->buffer)) == LDNS_RCODE_NOERROR || 
 		LDNS_RCODE_WIRE(sldns_buffer_begin(c->buffer)) == 
@@ -2060,12 +2059,12 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 		  }
 		} else {
 		  log_addr(VERB_ALGO, "serviced query: EDNS fails, but "
-		  	"not stored because need DNSSEC for", &sq->addr,
+			"not stored because need DNSSEC for", &sq->addr,
 			sq->addrlen);
 		}
 		sq->status = serviced_query_UDP;
-	    }
-	    if(now.tv_sec > sq->last_sent_time.tv_sec ||
+	}
+	if(now.tv_sec > sq->last_sent_time.tv_sec ||
 		(now.tv_sec == sq->last_sent_time.tv_sec &&
 		now.tv_usec > sq->last_sent_time.tv_usec)) {
 		/* convert from microseconds to milliseconds */
@@ -2081,11 +2080,10 @@ serviced_udp_callback(struct comm_point* c, void* arg, int error,
 			sq->last_rtt, (time_t)now.tv_sec))
 			log_err("out of memory noting rtt.");
 		}
-	    }
-	} /* end of if_!fallback_tcp */
+	}
 	/* perform TC flag check and TCP fallback after updating our
 	 * cache entries for EDNS status and RTT times */
-	if(LDNS_TC_WIRE(sldns_buffer_begin(c->buffer)) || fallback_tcp) {
+	if(LDNS_TC_WIRE(sldns_buffer_begin(c->buffer))) {
 		/* fallback to TCP */
 		/* this discards partial UDP contents */
 		if(sq->status == serviced_query_UDP_EDNS ||
@@ -2139,18 +2137,14 @@ outnet_serviced_query(struct outside_network* outnet,
 		if(outnet->do_udp && !(tcp_upstream || ssl_upstream)) {
 			if(!serviced_udp_send(sq, buff)) {
 				(void)rbtree_delete(outnet->serviced, sq);
-				free(sq->qbuf);
-				free(sq->zone);
-				free(sq);
+				serviced_node_del(&sq->node, NULL);
 				free(cb);
 				return NULL;
 			}
 		} else {
 			if(!serviced_tcp_send(sq, buff)) {
 				(void)rbtree_delete(outnet->serviced, sq);
-				free(sq->qbuf);
-				free(sq->zone);
-				free(sq);
+				serviced_node_del(&sq->node, NULL);
 				free(cb);
 				return NULL;
 			}
@@ -2199,10 +2193,11 @@ fd_for_dest(struct outside_network* outnet, struct sockaddr_storage* to_addr,
 {
 	struct sockaddr_storage* addr;
 	socklen_t addrlen;
-	int i, try, pnum;
+	int i, try, pnum, dscp;
 	struct port_if* pif;
 
 	/* create fd */
+	dscp = outnet->ip_dscp;
 	for(try = 0; try<1000; try++) {
 		int port = 0;
 		int freebind = 0;
@@ -2232,6 +2227,7 @@ fd_for_dest(struct outside_network* outnet, struct sockaddr_storage* to_addr,
 		}
 		addr = &pif->addr;
 		addrlen = pif->addrlen;
+#ifndef DISABLE_EXPLICIT_PORT_RANDOMISATION
 		pnum = ub_random_max(outnet->rnd, pif->avail_total);
 		if(pnum < pif->inuse) {
 			/* port already open */
@@ -2240,19 +2236,21 @@ fd_for_dest(struct outside_network* outnet, struct sockaddr_storage* to_addr,
 			/* unused ports in start part of array */
 			port = pif->avail_ports[pnum - pif->inuse];
 		}
-
+#else
+		pnum = port = 0;
+#endif
 		if(addr_is_ip6(to_addr, to_addrlen)) {
 			struct sockaddr_in6 sa = *(struct sockaddr_in6*)addr;
 			sa.sin6_port = (in_port_t)htons((uint16_t)port);
 			fd = create_udp_sock(AF_INET6, SOCK_DGRAM,
 				(struct sockaddr*)&sa, addrlen, 1, &inuse, &noproto,
-				0, 0, 0, NULL, 0, freebind, 0);
+				0, 0, 0, NULL, 0, freebind, 0, dscp);
 		} else {
 			struct sockaddr_in* sa = (struct sockaddr_in*)addr;
 			sa->sin_port = (in_port_t)htons((uint16_t)port);
 			fd = create_udp_sock(AF_INET, SOCK_DGRAM, 
 				(struct sockaddr*)addr, addrlen, 1, &inuse, &noproto,
-				0, 0, 0, NULL, 0, freebind, 0);
+				0, 0, 0, NULL, 0, freebind, 0, dscp);
 		}
 		if(fd != -1) {
 			return fd;
@@ -2286,14 +2284,70 @@ outnet_comm_point_for_udp(struct outside_network* outnet,
 	return cp;
 }
 
+/** setup SSL for comm point */
+static int
+setup_comm_ssl(struct comm_point* cp, struct outside_network* outnet,
+	int fd, char* host)
+{
+	cp->ssl = outgoing_ssl_fd(outnet->sslctx, fd);
+	if(!cp->ssl) {
+		log_err("cannot create SSL object");
+		return 0;
+	}
+#ifdef USE_WINSOCK
+	comm_point_tcp_win_bio_cb(cp, cp->ssl);
+#endif
+	cp->ssl_shake_state = comm_ssl_shake_write;
+	/* https verification */
+#ifdef HAVE_SSL
+	if(outnet->tls_use_sni) {
+		(void)SSL_set_tlsext_host_name(cp->ssl, host);
+	}
+#endif
+#ifdef HAVE_SSL_SET1_HOST
+	if((SSL_CTX_get_verify_mode(outnet->sslctx)&SSL_VERIFY_PEER)) {
+		/* because we set SSL_VERIFY_PEER, in netevent in
+		 * ssl_handshake, it'll check if the certificate
+		 * verification has succeeded */
+		/* SSL_VERIFY_PEER is set on the sslctx */
+		/* and the certificates to verify with are loaded into
+		 * it with SSL_load_verify_locations or
+		 * SSL_CTX_set_default_verify_paths */
+		/* setting the hostname makes openssl verify the
+		 * host name in the x509 certificate in the
+		 * SSL connection*/
+		if(!SSL_set1_host(cp->ssl, host)) {
+			log_err("SSL_set1_host failed");
+			return 0;
+		}
+	}
+#elif defined(HAVE_X509_VERIFY_PARAM_SET1_HOST)
+	/* openssl 1.0.2 has this function that can be used for
+	 * set1_host like verification */
+	if((SSL_CTX_get_verify_mode(outnet->sslctx)&SSL_VERIFY_PEER)) {
+		X509_VERIFY_PARAM* param = SSL_get0_param(cp->ssl);
+#  ifdef X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS
+		X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+#  endif
+		if(!X509_VERIFY_PARAM_set1_host(param, host, strlen(host))) {
+			log_err("X509_VERIFY_PARAM_set1_host failed");
+			return 0;
+		}
+	}
+#else
+	(void)host;
+#endif /* HAVE_SSL_SET1_HOST */
+	return 1;
+}
+
 struct comm_point*
 outnet_comm_point_for_tcp(struct outside_network* outnet,
 	comm_point_callback_type* cb, void* cb_arg,
 	struct sockaddr_storage* to_addr, socklen_t to_addrlen,
-	sldns_buffer* query, int timeout)
+	sldns_buffer* query, int timeout, int ssl, char* host)
 {
 	struct comm_point* cp;
-	int fd = outnet_get_tcp_fd(to_addr, to_addrlen, outnet->tcp_mss);
+	int fd = outnet_get_tcp_fd(to_addr, to_addrlen, outnet->tcp_mss, outnet->ip_dscp);
 	if(fd == -1) {
 		return 0;
 	}
@@ -2310,6 +2364,16 @@ outnet_comm_point_for_tcp(struct outside_network* outnet,
 	}
 	cp->repinfo.addrlen = to_addrlen;
 	memcpy(&cp->repinfo.addr, to_addr, to_addrlen);
+
+	/* setup for SSL (if needed) */
+	if(ssl) {
+		if(!setup_comm_ssl(cp, outnet, fd, host)) {
+			log_err("cannot setup XoT");
+			comm_point_delete(cp);
+			return NULL;
+		}
+	}
+
 	/* set timeout on TCP connection */
 	comm_point_start_listening(cp, fd, timeout);
 	/* copy scratch buffer to cp->buffer */
@@ -2345,7 +2409,7 @@ outnet_comm_point_for_http(struct outside_network* outnet,
 {
 	/* cp calls cb with err=NETEVENT_DONE when transfer is done */
 	struct comm_point* cp;
-	int fd = outnet_get_tcp_fd(to_addr, to_addrlen, outnet->tcp_mss);
+	int fd = outnet_get_tcp_fd(to_addr, to_addrlen, outnet->tcp_mss, outnet->ip_dscp);
 	if(fd == -1) {
 		return 0;
 	}
@@ -2366,48 +2430,11 @@ outnet_comm_point_for_http(struct outside_network* outnet,
 
 	/* setup for SSL (if needed) */
 	if(ssl) {
-		cp->ssl = outgoing_ssl_fd(outnet->sslctx, fd);
-		if(!cp->ssl) {
+		if(!setup_comm_ssl(cp, outnet, fd, host)) {
 			log_err("cannot setup https");
 			comm_point_delete(cp);
 			return NULL;
 		}
-#ifdef USE_WINSOCK
-		comm_point_tcp_win_bio_cb(cp, cp->ssl);
-#endif
-		cp->ssl_shake_state = comm_ssl_shake_write;
-		/* https verification */
-#ifdef HAVE_SSL_SET1_HOST
-		if((SSL_CTX_get_verify_mode(outnet->sslctx)&SSL_VERIFY_PEER)) {
-			/* because we set SSL_VERIFY_PEER, in netevent in
-			 * ssl_handshake, it'll check if the certificate
-			 * verification has succeeded */
-			/* SSL_VERIFY_PEER is set on the sslctx */
-			/* and the certificates to verify with are loaded into
-			 * it with SSL_load_verify_locations or
-			 * SSL_CTX_set_default_verify_paths */
-			/* setting the hostname makes openssl verify the
-			 * host name in the x509 certificate in the
-			 * SSL connection*/
-		 	if(!SSL_set1_host(cp->ssl, host)) {
-				log_err("SSL_set1_host failed");
-				comm_point_delete(cp);
-				return NULL;
-			}
-		}
-#elif defined(HAVE_X509_VERIFY_PARAM_SET1_HOST)
-		/* openssl 1.0.2 has this function that can be used for
-		 * set1_host like verification */
-		if((SSL_CTX_get_verify_mode(outnet->sslctx)&SSL_VERIFY_PEER)) {
-			X509_VERIFY_PARAM* param = SSL_get0_param(cp->ssl);
-			X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-			if(!X509_VERIFY_PARAM_set1_host(param, host, strlen(host))) {
-				log_err("X509_VERIFY_PARAM_set1_host failed");
-				comm_point_delete(cp);
-				return NULL;
-			}
-		}
-#endif /* HAVE_SSL_SET1_HOST */
 	}
 
 	/* set timeout on TCP connection */
@@ -2440,7 +2467,10 @@ if_get_mem(struct port_if* pif)
 {
 	size_t s;
 	int i;
-	s = sizeof(*pif) + sizeof(int)*pif->avail_total +
+	s = sizeof(*pif) +
+#ifndef DISABLE_EXPLICIT_PORT_RANDOMISATION
+	    sizeof(int)*pif->avail_total +
+#endif
 		sizeof(struct port_comm*)*pif->maxout;
 	for(i=0; i<pif->inuse; i++)
 		s += sizeof(*pif->out[i]) + 

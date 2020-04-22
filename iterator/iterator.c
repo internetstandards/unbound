@@ -159,7 +159,7 @@ iter_new(struct module_qstate* qstate, int id)
 	iq->qchase = qstate->qinfo;
 	outbound_list_init(&iq->outlist);
 	iq->minimise_count = 0;
-	iq->minimise_timeout_count = 0;
+	iq->timeout_count = 0;
 	if (qstate->env->cfg->qname_minimisation)
 		iq->minimisation_state = INIT_MINIMISE_STATE;
 	else
@@ -409,6 +409,8 @@ iter_prepend(struct iter_qstate* iq, struct dns_msg* msg,
 	num_an = 0;
 	for(p = iq->an_prepend_list; p; p = p->next) {
 		sets[num_an++] = p->rrset;
+		if(ub_packed_rrset_ttl(p->rrset) < msg->rep->ttl)
+			msg->rep->ttl = ub_packed_rrset_ttl(p->rrset);
 	}
 	memcpy(sets+num_an, msg->rep->rrsets, msg->rep->an_numrrsets *
 		sizeof(struct ub_packed_rrset_key*));
@@ -421,6 +423,8 @@ iter_prepend(struct iter_qstate* iq, struct dns_msg* msg,
 			msg->rep->ns_numrrsets, p->rrset))
 			continue;
 		sets[msg->rep->an_numrrsets + num_an + num_ns++] = p->rrset;
+		if(ub_packed_rrset_ttl(p->rrset) < msg->rep->ttl)
+			msg->rep->ttl = ub_packed_rrset_ttl(p->rrset);
 	}
 	memcpy(sets + num_an + msg->rep->an_numrrsets + num_ns, 
 		msg->rep->rrsets + msg->rep->an_numrrsets, 
@@ -1448,7 +1452,8 @@ processInitRequest(struct module_qstate* qstate, struct iter_qstate* iq,
 			 * now will also exceed the rate, keeping cache fresh */
 			(void)infra_ratelimit_inc(qstate->env->infra_cache,
 				iq->dp->name, iq->dp->namelen,
-				*qstate->env->now);
+				*qstate->env->now, &qstate->qinfo,
+				qstate->reply);
 			/* see if we are passed through with slip factor */
 			if(qstate->env->cfg->ratelimit_factor != 0 &&
 				ub_random_max(qstate->env->rnd,
@@ -2105,6 +2110,8 @@ processQueryTargets(struct module_qstate* qstate, struct iter_qstate* iq,
 	struct delegpt_addr* target;
 	struct outbound_entry* outq;
 	int auth_fallback = 0;
+	uint8_t* qout_orig = NULL;
+	size_t qout_orig_len = 0;
 
 	/* NOTE: a request will encounter this state for each target it 
 	 * needs to send a query to. That is, at least one per referral, 
@@ -2178,10 +2185,12 @@ processQueryTargets(struct module_qstate* qstate, struct iter_qstate* iq,
 		int labdiff = qchaselabs -
 			dname_count_labels(iq->qinfo_out.qname);
 
+		qout_orig = iq->qinfo_out.qname;
+		qout_orig_len = iq->qinfo_out.qname_len;
 		iq->qinfo_out.qname = iq->qchase.qname;
 		iq->qinfo_out.qname_len = iq->qchase.qname_len;
 		iq->minimise_count++;
-		iq->minimise_timeout_count = 0;
+		iq->timeout_count = 0;
 
 		iter_dec_attempts(iq->dp, 1);
 
@@ -2240,7 +2249,7 @@ processQueryTargets(struct module_qstate* qstate, struct iter_qstate* iq,
 		}
 	}
 	if(iq->minimisation_state == SKIP_MINIMISE_STATE) {
-		if(iq->minimise_timeout_count < MAX_MINIMISE_TIMEOUT_COUNT)
+		if(iq->timeout_count < MAX_MINIMISE_TIMEOUT_COUNT)
 			/* Do not increment qname, continue incrementing next 
 			 * iteration */
 			iq->minimisation_state = MINIMISE_STATE;
@@ -2330,6 +2339,13 @@ processQueryTargets(struct module_qstate* qstate, struct iter_qstate* iq,
 			/* wait to get all targets, we want to try em */
 			verbose(VERB_ALGO, "wait for all targets for fallback");
 			qstate->ext_state[id] = module_wait_reply;
+			/* undo qname minimise step because we'll get back here
+			 * to do it again */
+			if(qout_orig && iq->minimise_count > 0) {
+				iq->minimise_count--;
+				iq->qinfo_out.qname = qout_orig;
+				iq->qinfo_out.qname_len = qout_orig_len;
+			}
 			return 0;
 		}
 		/* did we do enough fallback queries already? */
@@ -2463,13 +2479,21 @@ processQueryTargets(struct module_qstate* qstate, struct iter_qstate* iq,
 				iq->num_current_queries);
 			qstate->ext_state[id] = module_wait_reply;
 		}
+		/* undo qname minimise step because we'll get back here
+		 * to do it again */
+		if(qout_orig && iq->minimise_count > 0) {
+			iq->minimise_count--;
+			iq->qinfo_out.qname = qout_orig;
+			iq->qinfo_out.qname_len = qout_orig_len;
+		}
 		return 0;
 	}
 
 	/* if not forwarding, check ratelimits per delegationpoint name */
 	if(!(iq->chase_flags & BIT_RD) && !iq->ratelimit_ok) {
 		if(!infra_ratelimit_inc(qstate->env->infra_cache, iq->dp->name,
-			iq->dp->namelen, *qstate->env->now)) {
+			iq->dp->namelen, *qstate->env->now, &qstate->qinfo,
+			qstate->reply)) {
 			lock_basic_lock(&ie->queries_ratelimit_lock);
 			ie->num_queries_ratelimited++;
 			lock_basic_unlock(&ie->queries_ratelimit_lock);
@@ -2562,14 +2586,15 @@ processQueryResponse(struct module_qstate* qstate, struct iter_qstate* iq,
 	if(iq->response == NULL) {
 		/* Don't increment qname when QNAME minimisation is enabled */
 		if(qstate->env->cfg->qname_minimisation) {
-			iq->minimise_timeout_count++;
 			iq->minimisation_state = SKIP_MINIMISE_STATE;
 		}
+		iq->timeout_count++;
 		iq->chase_to_rd = 0;
 		iq->dnssec_lame_query = 0;
 		verbose(VERB_ALGO, "query response was timeout");
 		return next_state(iq, QUERYTARGETS_STATE);
 	}
+	iq->timeout_count = 0;
 	type = response_type_from_server(
 		(int)((iq->chase_flags&BIT_RD) || iq->chase_to_rd),
 		iq->response, &iq->qinfo_out, iq->dp);
@@ -2698,8 +2723,15 @@ processQueryResponse(struct module_qstate* qstate, struct iter_qstate* iq,
 			&& !(iq->chase_flags & BIT_RD)) {
 			if(FLAGS_GET_RCODE(iq->response->rep->flags) != 
 				LDNS_RCODE_NOERROR) {
-				if(qstate->env->cfg->qname_minimisation_strict)
-					return final_state(iq);
+				if(qstate->env->cfg->qname_minimisation_strict) {
+					if(FLAGS_GET_RCODE(iq->response->rep->flags) ==
+						LDNS_RCODE_NXDOMAIN) {
+						iter_scrub_nxdomain(iq->response);
+						return final_state(iq);
+					}
+					return error_response(qstate, id,
+						LDNS_RCODE_SERVFAIL);
+				}
 				/* Best effort qname-minimisation. 
 				 * Stop minimising and send full query when
 				 * RCODE is not NOERROR. */
@@ -3568,7 +3600,7 @@ process_response(struct module_qstate* qstate, struct iter_qstate* iq,
 	iq->response = NULL;
 	iq->state = QUERY_RESP_STATE;
 	if(event == module_event_noreply || event == module_event_error) {
-		if(event == module_event_noreply && iq->sent_count >= 3 &&
+		if(event == module_event_noreply && iq->timeout_count >= 3 &&
 			qstate->env->cfg->use_caps_bits_for_id &&
 			!iq->caps_fallback && !is_caps_whitelisted(ie, iq)) {
 			/* start fallback */

@@ -50,7 +50,7 @@ server:
 	username: unbound
 	# make sure unbound can access entropy from inside the chroot.
 	# e.g. on linux the use these commands (on BSD, devfs(8) is used):
-	#      mount \-\-bind \-n /dev/random /etc/unbound/dev/random
+	#      mount \-\-bind \-n /dev/urandom /etc/unbound/dev/urandom
 	# and  mount \-\-bind \-n /dev/log /etc/unbound/dev/log
 	chroot: "/etc/unbound"
 	# logfile: "/etc/unbound/unbound.log"  #uncomment to use logfile.
@@ -63,8 +63,10 @@ server:
 	access\-control: 2001:DB8::/64 allow
 .fi
 .SH "FILE FORMAT"
-There must be whitespace between keywords. Attribute keywords end with a colon ':'.
-An attribute is followed by its containing attributes, or a value.
+There must be whitespace between keywords.  Attribute keywords end with a
+colon ':'.  An attribute is followed by a value, or its containing attributes
+in which case it is referred to as a clause.  Clauses can be repeated throughout
+the file (or included files) to group attributes under the same clause.
 .P
 Files can be included using the
 .B include:
@@ -124,9 +126,12 @@ interface and port number), if not specified the default port (from
 Same as interface: (for ease of compatibility with nsd.conf).
 .TP
 .B interface\-automatic: \fI<yes or no>
-Detect source interface on UDP queries and copy them to replies.  This
-feature is experimental, and needs support in your OS for particular socket
-options.  Default value is no.
+Listen on all addresses on all (current and future) interfaces, detect the
+source interface on UDP queries and copy them to replies.  This is a lot like
+ip\-transparent, but this option services all interfaces whilst with
+ip\-transparent you can select which (future) interfaces unbound provides
+service on.  This feature is experimental, and needs support in your OS for
+particular socket options.  Default value is no.
 .TP
 .B outgoing\-interface: \fI<ip address or ip6 netblock>
 Interface to use to connect to the network. This interface is used to send
@@ -300,6 +305,8 @@ it may also work.  You can enable it (on any platform and kernel),
 it then attempts to open the port and passes the option if it was available
 at compile time, if that works it is used, if it fails, it continues
 silently (unless verbosity 3) without the option.
+At extreme load it could be better to turn it off to distribute the queries
+evenly, reported for Linux systems (4.4.x).
 .TP
 .B ip\-transparent: \fI<yes or no>
 If yes, then use IP_TRANSPARENT socket option on sockets where unbound
@@ -318,6 +325,12 @@ is listening to incoming traffic.  Default no.  Allows you to bind to
 IP addresses that are nonlocal or do not exist, like when the network
 interface or IP address is down.  Exists only on Linux, where the similar
 ip\-transparent option is also available.
+.TP
+.B ip-dscp: \fI<number>
+The value of the Differentiated Services Codepoint (DSCP) in the
+differentiated services field (DS) of the outgoing IP packet headers.
+The field replaces the outdated IPv4 Type-Of-Service field and the
+IPV6 traffic class field.
 .TP
 .B rrset\-cache\-size: \fI<number>
 Number of bytes size of the RRset cache. Default is 4 megabytes.
@@ -376,6 +389,13 @@ If disabled, queries are not answered on IPv6, and queries are not sent on
 IPv6 to the internet nameservers.  With this option you can disable the
 ipv6 transport for sending DNS traffic, it does not impact the contents of
 the DNS traffic, which may have ip4 and ip6 addresses in it.
+.TP
+.B prefer\-ip4: \fI<yes or no>
+If enabled, prefer IPv4 transport for sending DNS queries to internet
+nameservers. Default is no.  Useful if the IPv6 netblock the server has,
+the entire /64 of that is not owned by one operator and the reputation of
+the netblock /64 is an issue, using IPv4 then uses the IPv4 filters that
+the upstream servers have.
 .TP
 .B prefer\-ip6: \fI<yes or no>
 If enabled, prefer IPv6 transport for sending DNS queries to internet
@@ -458,14 +478,15 @@ Alternate syntax for \fBtls\-upstream\fR.  If both are present in the config
 file the last is used.
 .TP
 .B tls\-service\-key: \fI<file>
-If enabled, the server provides TLS service on its TCP sockets.  The clients
-have to use tls\-upstream: yes.  The file is the private key for the TLS
-session.  The public certificate is in the tls\-service\-pem file.  Default
-is "", turned off.  Requires a restart (a reload is not enough) if changed,
-because the private key is read while root permissions are held and before
-chroot (if any).  Normal DNS TCP service is not provided and gives errors,
-this service is best run with a different \fBport:\fR config or \fI@port\fR
-suffixes in the \fBinterface\fR config.
+If enabled, the server provides TLS service on the TCP ports marked
+implicitly or explicitly for TLS service with tls\-port.  The file must
+contain the private key for the TLS session, the public certificate is in
+the tls\-service\-pem file and it must also be specified if tls\-service\-key
+is specified.  The default is "", turned off.  Enabling or disabling
+this service requires a restart (a reload is not enough), because the
+key is read while root permissions are held and before chroot (if any).
+The ports enabled implicitly or explicitly via \fBtls\-port:\fR do not provide
+normal DNS TCP service.
 .TP
 .B ssl\-service\-key: \fI<file>
 Alternate syntax for \fBtls\-service\-key\fR.
@@ -525,6 +546,11 @@ and that is the default.
 Set the list of ciphersuites to allow when serving TLS.  This is for newer
 TLS 1.3 connections.  Use "" for defaults, and that is the default.
 .TP
+.B tls\-use\-sni: \fI<yes or no>
+Enable or disable sending the SNI extension on TLS connections.
+Default is yes.
+Changing the value requires a reload.
+.TP
 .B use\-systemd: \fI<yes or no>
 Enable or disable systemd socket activation.
 Default is no.
@@ -545,6 +571,7 @@ classless network block. The action can be \fIdeny\fR, \fIrefuse\fR,
 \fIallow\fR, \fIallow_setrd\fR, \fIallow_snoop\fR, \fIdeny_non_local\fR or
 \fIrefuse_non_local\fR.
 The most specific netblock match is used, if none match \fIdeny\fR is used.
+The order of the access\-control statements therefore does not matter.
 .IP
 The action \fIdeny\fR stops queries from hosts from that netblock.
 .IP
@@ -625,9 +652,11 @@ In the last case the path is adjusted to remove the unused portion.
 The pidfile can be either a relative path to the working directory, or
 an absolute path relative to the original root. It is written just prior
 to chroot and dropping permissions. This allows the pidfile to be
-/var/run/unbound.pid and the chroot to be /var/unbound, for example.
+/var/run/unbound.pid and the chroot to be /var/unbound, for example. Note that
+Unbound is not able to remove the pidfile after termination when it is located
+outside of the chroot directory.
 .IP
-Additionally, unbound may need to access /dev/random (for entropy)
+Additionally, unbound may need to access /dev/urandom (for entropy)
 from inside the chroot.
 .IP
 If given a chroot is done to the given directory. By default chroot is
@@ -769,7 +798,7 @@ wise to send these, and could be necessary for operation if TSIG or EDNS
 payload is very large.
 .TP
 .B harden\-glue: \fI<yes or no>
-Will trust glue only if it is within the servers authority. Default is on.
+Will trust glue only if it is within the servers authority. Default is yes.
 .TP
 .B harden\-dnssec\-stripped: \fI<yes or no>
 Require DNSSEC data for trust\-anchored zones, if such data is absent,
@@ -779,7 +808,7 @@ this behaves like there is no trust anchor. You could turn this off if
 you are sometimes behind an intrusive firewall (of some sort) that
 removes DNSSEC data from packets, or a zone changes from signed to
 unsigned to badly signed often. If turned off you run the risk of a
-downgrade attack that disables security for a zone. Default is on.
+downgrade attack that disables security for a zone. Default is yes.
 .TP
 .B harden\-below\-nxdomain: \fI<yes or no>
 From RFC 8020 (with title "NXDOMAIN: There Really Is Nothing Underneath"),
@@ -789,7 +818,7 @@ noerror for empty nonterminals, hence this is possible.  Very old software
 might return nxdomain for empty nonterminals (that usually happen for reverse
 IP address lookups), and thus may be incompatible with this.  To try to avoid
 this only DNSSEC-secure nxdomains are used, because the old software does not
-have DNSSEC.  Default is on.
+have DNSSEC.  Default is yes.
 The nxdomain must be secure, this means nsec3 with optout is insufficient.
 .TP
 .B harden\-referral\-path: \fI<yes or no>
@@ -826,7 +855,7 @@ Can be given multiple times, for different domains.
 .TP
 .B qname\-minimisation: \fI<yes or no>
 Send minimum amount of information to upstream servers to enhance privacy.
-Only sent minimum required labels of the QNAME and set QTYPE to A when
+Only send minimum required labels of the QNAME and set QTYPE to A when
 possible. Best effort approach; full QNAME and original QTYPE will be sent when
 upstream replies with a RCODE other than NOERROR, except when receiving
 NXDOMAIN from a DNSSEC signed zone. Default is yes.
@@ -903,7 +932,7 @@ are none.
 .TP
 .B rrset\-roundrobin: \fI<yes or no>
 If yes, Unbound rotates RRSet order in response (the random number is taken
-from the query ID, for speed and thread safety).  Default is no.
+from the query ID, for speed and thread safety).  Default is yes.
 .TP
 .B minimal-responses: \fI<yes or no>
 If yes, Unbound doesn't insert authority/additional sections into response
@@ -929,6 +958,12 @@ Setting this to "iterator" will result in a non\-validating server.
 Setting this to "validator iterator" will turn on DNSSEC validation.
 The ordering of the modules is important.
 You must also set trust\-anchors for validation to be useful.
+The default is "validator iterator".  When the server is built with
+EDNS client subnet support the default is "subnetcache validator iterator".
+Most modules that need to be listed here have to be listed at the beginning
+of the line.  The cachedb module has to be listed just before the iterator.
+The python module can be listed in different places, it then processes the
+output of the module it is just before.
 .TP
 .B trust\-anchor\-file: \fI<filename>
 File with trusted keys for validation. Both DS and DNSKEY entries can appear
@@ -937,7 +972,7 @@ Default is "", or no trust anchor file.
 .TP
 .B auto\-trust\-anchor\-file: \fI<filename>
 File with trust anchor for one zone, which is tracked with RFC5011 probes.
-The probes are several times per month, thus the machine must be online
+The probes are run several times per month, thus the machine must be online
 frequently.  The initial file can be one with contents as described in
 \fBtrust\-anchor\-file\fR.  The file is written to when the anchor is updated,
 so the unbound user must have write permission.  Write permission to the file,
@@ -962,10 +997,10 @@ It is possible to use wildcards with this statement, the wildcard is
 expanded on start and on reload.
 .TP
 .B trust\-anchor\-signaling: \fI<yes or no>
-Send RFC8145 key tag query after trust anchor priming. Default is on.
+Send RFC8145 key tag query after trust anchor priming. Default is yes.
 .TP
 .B root\-key\-sentinel: \fI<yes or no>
-Root key trust anchor sentinel. Default is on.
+Root key trust anchor sentinel. Default is yes.
 .TP
 .B dlv\-anchor\-file: \fI<filename>
 This option was used during early days DNSSEC deployment when no parent-side
@@ -1058,19 +1093,34 @@ The default value is "no".
 .TP
 .B serve\-expired: \fI<yes or no>
 If enabled, unbound attempts to serve old responses from cache with a
-TTL of 0 in the response without waiting for the actual resolution to finish.
-The actual resolution answer ends up in the cache later on.  Default is "no".
+TTL of \fBserve\-expired\-reply\-ttl\fR in the response without waiting for the
+actual resolution to finish.  The actual resolution answer ends up in the cache
+later on.  Default is "no".
 .TP
 .B serve\-expired\-ttl: \fI<seconds>
 Limit serving of expired responses to configured seconds after expiration. 0
-disables the limit. This option only applies when \fBserve\-expired\fR is
-enabled. The default is 0.
+disables the limit.  This option only applies when \fBserve\-expired\fR is
+enabled.  A suggested value per draft-ietf-dnsop-serve-stale-10 is between
+86400 (1 day) and 259200 (3 days).  The default is 0.
 .TP
 .B serve\-expired\-ttl\-reset: \fI<yes or no>
 Set the TTL of expired records to the \fBserve\-expired\-ttl\fR value after a
-failed attempt to retrieve the record from upstream. This makes sure that the
-expired records will be served as long as there are queries for it. Default is
+failed attempt to retrieve the record from upstream.  This makes sure that the
+expired records will be served as long as there are queries for it.  Default is
 "no".
+.TP
+.B serve\-expired\-reply\-ttl: \fI<seconds>
+TTL value to use when replying with expired data.  If
+\fBserve\-expired\-client\-timeout\fR is also used then it is RECOMMENDED to
+use 30 as the value (draft-ietf-dnsop-serve-stale-10).  The default is 30.
+.TP
+.B serve\-expired\-client\-timeout: \fI<msec>
+Time in milliseconds before replying to the client with expired data.  This
+essentially enables the serve-stale behavior as specified in
+draft-ietf-dnsop-serve-stale-10 that first tries to resolve before immediately
+responding with expired data.  A recommended value per
+draft-ietf-dnsop-serve-stale-10 is 1800.  Setting this to 0 will disable this
+behavior.  Default is 0.
 .TP
 .B val\-nsec3\-keysize\-iterations: \fI<"list of values">
 List of keysize and iteration count values, separated by spaces, surrounded
@@ -1140,7 +1190,7 @@ address space are not validated.  This is usually required whenever
 Configure a local zone. The type determines the answer to give if
 there is no match from local\-data. The types are deny, refuse, static,
 transparent, redirect, nodefault, typetransparent, inform, inform_deny,
-always_transparent, always_refuse, always_nxdomain, noview,
+inform_redirect, always_transparent, always_refuse, always_nxdomain, noview,
 and are explained below. After that the default settings are listed. Use
 local\-data: to enter data into the local zone. Answers for local zones
 are authoritative DNS answers. By default the zones are class IN.
@@ -1200,6 +1250,10 @@ looking up infected names are logged, eg. to run antivirus on them.
 \h'5'\fIinform_deny\fR
 The query is dropped, like 'deny', and logged, like 'inform'.  Ie. find
 infected machines without answering the queries.
+.TP 10
+\h'5'\fIinform_redirect\fR
+The query is redirected, like 'redirect', and logged, like 'inform'.
+Ie. answer queries with fixed data and also log the machines that ask.
 .TP 10
 \h'5'\fIalways_transparent\fR
 Like transparent, but ignores local data and resolves normally.
@@ -1280,7 +1334,7 @@ local\-data: "onion. 10800 IN
     SOA localhost. nobody.invalid. 1 3600 1200 604800 10800"
 .fi
 .TP 10
-\h'5'\fItest (RFC 2606)\fR
+\h'5'\fItest (RFC 6761)\fR
 Default content:
 .nf
 local\-zone: "test." static
@@ -1289,7 +1343,7 @@ local\-data: "test. 10800 IN
     SOA localhost. nobody.invalid. 1 3600 1200 604800 10800"
 .fi
 .TP 10
-\h'5'\fIinvalid (RFC 2606)\fR
+\h'5'\fIinvalid (RFC 6761)\fR
 Default content:
 .nf
 local\-zone: "invalid." static
@@ -1356,7 +1410,8 @@ TTL can be inserted like this: "2001:DB8::4 7200 www.example.com"
 Assign tags to localzones. Tagged localzones will only be applied when the
 used access-control element has a matching tag. Tags must be defined in
 \fIdefine\-tags\fR.  Enclose list of tags in quotes ("") and put spaces between
-tags.
+tags.  When there are multiple tags it checks if the intersection of the
+list of tags for the query and local\-zone\-tag is non-empty.
 .TP 5
 .B local\-zone\-override: \fI<zone> <IP netblock> <type>
 Override the localzone type for queries from addresses matching netblock.
@@ -1614,13 +1669,11 @@ the '@' and '#', the '@' comes first.
 At high verbosity it logs the TLS certificate, with TLS enabled.
 If you leave out the '#' and auth name from the forward\-addr, any
 name is accepted.  The cert must also match a CA from the tls\-cert\-bundle.
-The cert name match code needs OpenSSL 1.1.0 or later to be enabled.
 .TP
 .B forward\-first: \fI<yes or no>
-If enabled, a query is attempted without the forward clause if it fails.
-The data could not be retrieved and would have caused SERVFAIL because
-the servers are unreachable, instead it is tried without this clause.
-The default is no.
+If a forwarded query is met with a SERVFAIL error, and this option is
+enabled, unbound will fall back to normal recursive resolution for this
+query as if no query forwarding had been specified.  The default is "no".
 .TP
 .B forward\-tls\-upstream: \fI<yes or no>
 Enabled or disable whether the queries to this forwarder use TLS for transport.
@@ -1664,6 +1717,13 @@ Name of the authority zone.
 .B master: \fI<IP address or host name>
 Where to download a copy of the zone from, with AXFR and IXFR.  Multiple
 masters can be specified.  They are all tried if one fails.
+With the "ip#name" notation a AXFR over TLS can be used.
+If you point it at another Unbound instance, it would not work because
+that does not support AXFR/IXFR for the zone, but if you used \fBurl:\fR to download
+the zonefile as a text file from a webserver that would work.
+If you specify the hostname, you cannot use the domain from the zonefile,
+because it may not have that when retrieving that data, instead use a plain
+IP address to avoid a circular dependency on retrieving that IP address.
 .TP
 .B url: \fI<url to zonefile>
 Where to download a zonefile for the zone.  With http or https.  An example
@@ -1675,6 +1735,10 @@ see if the SOA serial number has changed, reducing the number of downloads.
 If none of the urls work, the masters are tried with IXFR and AXFR.
 For https, the \fBtls\-cert\-bundle\fR and the hostname from the url are used
 to authenticate the connection.
+If you specify a hostname in the URL, you cannot use the domain from the
+zonefile, because it may not have that when retrieving that data, instead
+use a plain IP address to avoid a circular dependency on retrieving that IP
+address.  Avoid dependencies on name lookups by using a notation like "http://192.0.2.1/unbound-master/example.com.zone", with an explicit IP address.
 .TP
 .B allow\-notify: \fI<IP address or host name or netblockIP/prefix>
 With allow\-notify you can specify additional sources of notifies.
@@ -1715,7 +1779,9 @@ data (eg. from the master servers).
 There may be multiple
 .B view:
 clauses. Each with a \fBname:\fR and zero or more \fBlocal\-zone\fR and
-\fBlocal\-data\fR elements. View can be mapped to requests by specifying the
+\fBlocal\-data\fR elements. Views can also contain view\-first, 
+response\-ip, response\-ip\-data and local\-data\-ptr elements.
+View can be mapped to requests by specifying the
 view name in an \fBaccess\-control\-view\fR element. Options from matching
 views will override global options. Global options will be used if no matching
 view is found, or when the matching view does not have the option specified.
@@ -1752,7 +1818,8 @@ clause gives the settings for the \fIpython\fR(1) script module.  This module
 acts like the iterator and validator modules do, on queries and answers.
 To enable the script module it has to be compiled into the daemon,
 and the word "python" has to be put in the \fBmodule\-config:\fR option
-(usually first, or between the validator and iterator).
+(usually first, or between the validator and iterator). Multiple instances of
+the python module are supported by adding the word "python" more than once.
 .LP
 If the \fBchroot:\fR option is enabled, you should make sure Python's
 library directory structure is bind mounted in the new root environment, see
@@ -1761,7 +1828,8 @@ absolute path relative to the new root, or as a relative path to the working
 directory.
 .TP
 .B python\-script: \fI<python file>\fR
-The script file to load.
+The script file to load. Repeat this option for every python module instance
+added to the \fBmodule\-config:\fR option.
 .SS "DNS64 Module Options"
 .LP
 The dns64 module must be configured in the \fBmodule\-config:\fR "dns64
@@ -1994,6 +2062,13 @@ to the query without performing iterative DNS resolution.
 If Unbound cannot even find an answer in the backend, it resolves the
 query as usual, and stores the answer in the backend.
 .P
+This module interacts with the \fBserve\-expired\-*\fR options and will reply
+with expired data if unbound is configured for that.  Currently the use
+of \fBserve\-expired\-client\-timeout:\fR and
+\fBserve\-expired\-reply\-ttl:\fR is not consistent for data originating from
+the external cache as these will result in a reply with 0 TTL without trying to
+update the data first, ignoring the configured values.
+.P
 If Unbound was built with
 \fB\-\-with\-libhiredis\fR
 on a system that has installed the hiredis C client library of Redis,
@@ -2006,6 +2081,11 @@ even if some data have expired in terms of DNS TTL or the Redis server has
 cached too much data;
 if necessary the Redis server must be configured to limit the cache size,
 preferably with some kind of least-recently-used eviction policy.
+Additionaly, the \fBredis\-expire\-records\fR option can be used in order to
+set the relative DNS TTL of the message as timeout to the Redis records; keep
+in mind that some additional memory is used per key and that the expire
+information is stored as absolute Unix timestamps in Redis (computer time must
+be stable).
 This backend uses synchronous communication with the Redis server
 based on the assumption that the communication is stable and sufficiently
 fast.
@@ -2060,6 +2140,154 @@ If this timeout expires Unbound closes the connection, treats it as
 if the Redis server does not have the requested data, and will try to
 re-establish a new connection later.
 This option defaults to 100 milliseconds.
+.TP
+.B redis-expire-records: \fI<yes or no>
+If Redis record expiration is enabled.  If yes, unbound sets timeout for Redis
+records so that Redis can evict keys that have expired automatically.  If
+unbound is configured with \fBserve-expired\fR and \fBserve-expired-ttl\fR is 0,
+this option is internally reverted to "no".  Redis SETEX support is required
+for this option (Redis >= 2.0.0).
+This option defaults to no.
+.SS DNSTAP Logging Options
+DNSTAP support, when compiled in, is enabled in the \fBdnstap:\fR section.
+This starts an extra thread (when compiled with threading) that writes
+the log information to the destination.  If unbound is compiled without
+threading it does not spawn a thread, but connects per-process to the
+destination.
+.TP
+.B dnstap-enable: \fI<yes or no>
+If dnstap is enabled.  Default no.  If yes, it connects to the dnstap server
+and if any of the dnstap-log-..-messages options is enabled it sends logs
+for those messages to the server.
+.TP
+.B dnstap-socket-path: \fI<file name>
+Sets the unix socket file name for connecting to the server that is
+listening on that socket.  Default is "@DNSTAP_SOCKET_PATH@".
+.TP
+.B dnstap-ip: \fI<IPaddress[@port]>
+If "", the unix socket is used, if set with an IP address (IPv4 or IPv6)
+that address is used to connect to the server.
+.TP
+.B dnstap-tls: \fI<yes or no>
+Set this to use TLS to connect to the server specified in \fBdnstap-ip\fR.
+The default is yes.  If set to no, TCP is used to connect to the server.
+.TP
+.B dnstap-tls-server-name: \fI<name of TLS authentication>
+The TLS server name to authenticate the server with.  Used when \fBdnstap-tls\fR is enabled.  If "" it is ignored, default "".
+.TP
+.B dnstap-tls-cert-bundle: \fI<file name of cert bundle>
+The pem file with certs to verify the TLS server certificate. If "" the
+server default cert bundle is used, or the windows cert bundle on windows.
+Default is "".
+.TP
+.B dnstap-tls-client-key-file: \fI<file name>
+The client key file for TLS client authentication. If "" client
+authentication is not used.  Default is "".
+.TP
+.B dnstap-tls-client-cert-file: \fI<file name>
+The client cert file for TLS client authentication.  Default is "".
+.TP
+.B dnstap-send-identity: \fI<yes or no>
+If enabled, the server identity is included in the log messages.
+Default is no.
+.TP
+.B dnstap-send-version: \fI<yes or no>
+If enabled, the server version if included in the log messages.
+Default is no.
+.TP
+.B dnstap-identity: \fI<string>
+The identity to send with messages, if "" the hostname is used.
+Default is "".
+.TP
+.B dnstap-version: \fI<string>
+The version to send with messages, if "" the package version is used.
+Default is "".
+.TP
+.B dnstap-log-resolver-query-messages: \fI<yes or no>
+Enable to log resolver query messages.  Default is no.
+These are messages from unbound to upstream servers.
+.TP
+.B dnstap-log-resolver-response-messages: \fI<yes or no>
+Enable to log resolver response messages.  Default is no.
+These are replies from upstream servers to unbound.
+.TP
+.B dnstap-log-client-query-messages: \fI<yes or no>
+Enable to log client query messages.  Default is no.
+These are client queries to unbound.
+.TP
+.B dnstap-log-client-response-messages: \fI<yes or no>
+Enable to log client response messages.  Default is no.
+These are responses from unbound to clients.
+.TP
+.B dnstap-log-forwarder-query-messages: \fI<yes or no>
+Enable to log forwarder query messages.  Default is no.
+.TP
+.B dnstap-log-forwarder-response-messages: \fI<yes or no>
+Enable to log forwarder response messages.  Default is no.
+.SS Response Policy Zone Options
+.LP
+Response Policy Zones are configured with \fBrpz:\fR, and each one must have a
+\fBname:\fR. There can be multiple ones, by listing multiple rpz clauses, each
+with a different name. RPZ clauses are applied in order of configuration. The
+\fBrespip\fR module needs to be added to the \fBmodule-config\fR, e.g.:
+\fBmodule-config: "respip validator iterator"\fR.
+.P
+Only the QNAME and Response IP Address triggers are supported. The supported RPZ
+actions are: NXDOMAIN, NODATA, PASSTHRU, DROP and Local Data. RPZ QNAME triggers
+are applied after
+\fBlocal-zones\fR and before \fBauth-zones\fR.
+.TP
+.B name: \fI<zone name>
+Name of the authority zone.
+.TP
+.B master: \fI<IP address or host name>
+Where to download a copy of the zone from, with AXFR and IXFR.  Multiple
+masters can be specified.  They are all tried if one fails.
+.TP
+.B url: \fI<url to zonefile>
+Where to download a zonefile for the zone.  With http or https.  An example
+for the url is "http://www.example.com/example.org.zone".  Multiple url
+statements can be given, they are tried in turn.  If only urls are given
+the SOA refresh timer is used to wait for making new downloads.  If also
+masters are listed, the masters are first probed with UDP SOA queries to
+see if the SOA serial number has changed, reducing the number of downloads.
+If none of the urls work, the masters are tried with IXFR and AXFR.
+For https, the \fBtls\-cert\-bundle\fR and the hostname from the url are used
+to authenticate the connection.
+.TP
+.B allow\-notify: \fI<IP address or host name or netblockIP/prefix>
+With allow\-notify you can specify additional sources of notifies.
+When notified, the server attempts to first probe and then zone transfer.
+If the notify is from a master, it first attempts that master.  Otherwise
+other masters are attempted.  If there are no masters, but only urls, the
+file is downloaded when notified.  The masters from master: statements are
+allowed notify by default.
+.TP
+.B zonefile: \fI<filename>
+The filename where the zone is stored.  If not given then no zonefile is used.
+If the file does not exist or is empty, unbound will attempt to fetch zone
+data (eg. from the master servers).
+.TP
+.B rpz\-action\-override: \fI<action>
+Always use this RPZ action for matching triggers from this zone. Possible action
+are: nxdomain, nodata, passthru, drop, disabled and cname.
+.TP
+.B rpz\-cname\-override: \fI<domain>
+The CNAME target domain to use if the cname action is configured for
+\fBrpz\-action\-override\fR.
+.TP
+.B rpz\-log: \fI<yes or no>
+Log all applied RPZ actions for this RPZ zone. Default is no.
+.TP
+.B rpz\-log\-name: \fI<name>
+Specify a string to be part of the log line, for easy referencing.
+.TP
+.B tags: \fI<list of tags>
+Limit the policies from this RPZ clause to clients with a matching tag. Tags
+need to be defined in \fBdefine\-tag\fR and can be assigned to client addresses
+using \fBaccess\-control\-tag\fR. Enclose list of tags in quotes ("") and put
+spaces between tags. If no tags are specified the policies from this clause will
+be applied for all clients.
 .SH "MEMORY CONTROL EXAMPLE"
 In the example config settings below memory usage is reduced. Some service
 levels are lower, notable very large data and a high TCP load are no longer

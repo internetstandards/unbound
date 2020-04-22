@@ -15,6 +15,9 @@
 /* Do sha512 definitions in config.h */
 #undef COMPAT_SHA512
 
+/* Command line arguments used with configure */
+#undef CONFCMDLINE
+
 /* Pathname to the Unbound configuration file */
 #undef CONFIGFILE
 
@@ -24,6 +27,9 @@
 
 /* Whether daemon is deprecated */
 #undef DEPRECATED_DAEMON
+
+/* Define this to enable kernel based UDP source port randomization. */
+#undef DISABLE_EXPLICIT_PORT_RANDOMISATION
 
 /* default dnstap socket path */
 #undef DNSTAP_SOCKET_PATH
@@ -60,6 +66,15 @@
 /* Whether the C compiler accepts the "weak" attribute */
 #undef HAVE_ATTR_WEAK
 
+/* If we have be64toh */
+#undef HAVE_BE64TOH
+
+/* Define to 1 if you have the <bsd/stdlib.h> header file. */
+#undef HAVE_BSD_STDLIB_H
+
+/* Define to 1 if you have the <bsd/string.h> header file. */
+#undef HAVE_BSD_STRING_H
+
 /* Define to 1 if you have the `chown' function. */
 #undef HAVE_CHOWN
 
@@ -68,6 +83,9 @@
 
 /* Define to 1 if you have the `CRYPTO_cleanup_all_ex_data' function. */
 #undef HAVE_CRYPTO_CLEANUP_ALL_EX_DATA
+
+/* Define to 1 if you have the `CRYPTO_THREADID_set_callback' function. */
+#undef HAVE_CRYPTO_THREADID_SET_CALLBACK
 
 /* Define to 1 if you have the `ctime_r' function. */
 #undef HAVE_CTIME_R
@@ -82,6 +100,10 @@
 /* Define to 1 if you have the declaration of `arc4random_uniform', and to 0
    if you don't. */
 #undef HAVE_DECL_ARC4RANDOM_UNIFORM
+
+/* Define to 1 if you have the declaration of `evsignal_assign', and to 0 if
+   you don't. */
+#undef HAVE_DECL_EVSIGNAL_ASSIGN
 
 /* Define to 1 if you have the declaration of `inet_ntop', and to 0 if you
    don't. */
@@ -157,11 +179,17 @@
 /* Define to 1 if you have the `endservent' function. */
 #undef HAVE_ENDSERVENT
 
+/* Define to 1 if you have the `ENGINE_cleanup' function. */
+#undef HAVE_ENGINE_CLEANUP
+
 /* Define to 1 if you have the `ERR_free_strings' function. */
 #undef HAVE_ERR_FREE_STRINGS
 
 /* Define to 1 if you have the `ERR_load_crypto_strings' function. */
 #undef HAVE_ERR_LOAD_CRYPTO_STRINGS
+
+/* Define to 1 if you have the `event_assign' function. */
+#undef HAVE_EVENT_ASSIGN
 
 /* Define to 1 if you have the `event_base_free' function. */
 #undef HAVE_EVENT_BASE_FREE
@@ -271,6 +299,9 @@
 /* If you have HMAC_Update */
 #undef HAVE_HMAC_UPDATE
 
+/* If we have htobe64 */
+#undef HAVE_HTOBE64
+
 /* Define to 1 if you have the `inet_aton' function. */
 #undef HAVE_INET_ATON
 
@@ -297,6 +328,9 @@
 
 /* Define to 1 if you have the `kill' function. */
 #undef HAVE_KILL
+
+/* Use portable libbsd functions */
+#undef HAVE_LIBBSD
 
 /* Define to 1 if you have the <libkern/OSByteOrder.h> header file. */
 #undef HAVE_LIBKERN_OSBYTEORDER_H
@@ -403,7 +437,7 @@
 /* Define to 1 if you have the `RAND_cleanup' function. */
 #undef HAVE_RAND_CLEANUP
 
-/* Define to 1 if you have the `reallocarray' function. */
+/* If we have reallocarray(3) */
 #undef HAVE_REALLOCARRAY
 
 /* Define to 1 if you have the `recvmsg' function. */
@@ -562,6 +596,9 @@
 /* Define to 1 if you have the <sys/wait.h> header file. */
 #undef HAVE_SYS_WAIT_H
 
+/* Define to 1 if you have the <TargetConditionals.h> header file. */
+#undef HAVE_TARGETCONDITIONALS_H
+
 /* Define to 1 if you have the <time.h> header file. */
 #undef HAVE_TIME_H
 
@@ -606,6 +643,9 @@
 
 /* Define to 1 if you have the `_beginthreadex' function. */
 #undef HAVE__BEGINTHREADEX
+
+/* If HMAC_Init_ex() returns void */
+#undef HMAC_INIT_EX_RETURNS_VOID
 
 /* if lex has yylex_destroy */
 #undef LEX_HAS_YYLEX_DESTROY
@@ -699,6 +739,9 @@
 /* Shared data */
 #undef SHARE_DIR
 
+/* The size of `size_t', as computed by sizeof. */
+#undef SIZEOF_SIZE_T
+
 /* The size of `time_t', as computed by sizeof. */
 #undef SIZEOF_TIME_T
 
@@ -716,6 +759,9 @@
 
 /* Use win32 resources and API */
 #undef UB_ON_WINDOWS
+
+/* the SYSLOG_FACILITY to use, default LOG_DAEMON */
+#undef UB_SYSLOG_FACILITY
 
 /* default username */
 #undef UB_USERNAME
@@ -767,6 +813,12 @@
 
 /* Define to 1 to use ipsecmod support. */
 #undef USE_IPSECMOD
+
+/* Define to 1 to use ipset support */
+#undef USE_IPSET
+
+/* Define if you enable libevent */
+#undef USE_LIBEVENT
 
 /* Define if you want to use internal select based events */
 #undef USE_MINI_EVENT
@@ -965,8 +1017,14 @@
 
 
 
+#ifndef _OPENBSD_SOURCE
+#define _OPENBSD_SOURCE 1
+#endif
+
 #ifndef UNBOUND_DEBUG
+# ifndef NDEBUG
 #  define NDEBUG
+# endif
 #endif
 
 /** Use small-ldns codebase */
@@ -1199,6 +1257,15 @@ struct tm;
 char *strptime(const char *s, const char *format, struct tm *tm);
 #endif
 
+#if !HAVE_DECL_REALLOCARRAY
+void *reallocarray(void *ptr, size_t nmemb, size_t size);
+#endif
+
+#ifdef HAVE_LIBBSD
+#include <bsd/string.h>
+#include <bsd/stdlib.h>
+#endif
+
 #ifdef HAVE_LIBRESSL
 #  if !HAVE_DECL_STRLCPY
 size_t strlcpy(char *dst, const char *src, size_t siz);
@@ -1211,9 +1278,6 @@ uint32_t arc4random(void);
 #  endif
 #  if !HAVE_DECL_ARC4RANDOM_UNIFORM && defined(HAVE_ARC4RANDOM_UNIFORM)
 uint32_t arc4random_uniform(uint32_t upper_bound);
-#  endif
-#  if !HAVE_DECL_REALLOCARRAY
-void *reallocarray(void *ptr, size_t nmemb, size_t size);
 #  endif
 #endif /* HAVE_LIBRESSL */
 #ifndef HAVE_ARC4RANDOM

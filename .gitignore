@@ -1,9 +1,11 @@
 *.lo
 *.o
 /.libs/
+/.source
 /Makefile
 /autom4te.cache/
 /config.h
+/config.h.in~
 /config.log
 /config.status
 /dnstap/dnstap_config.h
@@ -18,6 +20,7 @@
 /doc/unbound.conf.5
 /libtool
 /libunbound.la
+/_unbound.la
 /smallapp/unbound-control-setup.sh
 /unbound
 /unbound-anchor
@@ -34,6 +37,7 @@
 /petal
 /pktview
 /streamtcp
+/unbound-dnstap-socket
 /testbound
 /unittest
 /contrib/libunbound.pc
@@ -41,3 +45,15 @@
 /contrib/unbound.socket
 cscope.out
 tags
+/contrib/unbound_portable.service
+/dnstap/dnstap.pb-c.c
+/dnstap/dnstap.pb-c.h
+/libunbound/python/libunbound_wrap.c
+/libunbound/python/unbound.py
+/pythonmod/interface.h
+/pythonmod/unboundmodule.py
+/testdata/result.*
+/testdata/.done-*
+/testdata/.perfstats.txt
+/doc/html
+/doc/xml

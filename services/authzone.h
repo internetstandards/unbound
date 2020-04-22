@@ -46,6 +46,7 @@
 #include "util/rbtree.h"
 #include "util/locks.h"
 #include "services/mesh.h"
+#include "services/rpz.h"
 struct ub_packed_rrset_key;
 struct regional;
 struct config_file;
@@ -81,6 +82,11 @@ struct auth_zones {
 	size_t num_query_up;
 	/** number of queries downstream */
 	size_t num_query_down;
+	/** first auth zone containing rpz item in linked list */
+	struct auth_zone* rpz_first;
+	/** rw lock for rpz linked list, needed when iterating or editing linked
+	 * list. */
+	lock_rw_type rpz_lock;
 };
 
 /**
@@ -126,10 +132,17 @@ struct auth_zone {
 	/** for upstream: this zone answers queries that unbound intends to
 	 * send upstream. */
 	int for_upstream;
+	/** RPZ zones */
+	struct rpz* rpz;
 	/** zone has been deleted */
 	int zone_deleted;
 	/** deletelist pointer, unused normally except during delete */
 	struct auth_zone* delete_next;
+	/* not protected by auth_zone lock, must be last items in struct */
+	/** next auth zone containing RPZ data, or NULL */
+	struct auth_zone* rpz_az_next;
+	/** previous auth zone containing RPZ data, or NULL */
+	struct auth_zone* rpz_az_prev;
 };
 
 /**
@@ -327,6 +340,8 @@ struct auth_probe {
 	/** the SOA probe udp event.
 	 * on the workers event base. */
 	struct comm_point* cp;
+	/** is the cp for ip6 or ip4 */
+	int cp_is_ip6;
 	/** timeout for packets.
 	 * on the workers event base. */
 	struct comm_timer* timer;
@@ -398,6 +413,9 @@ struct auth_transfer {
 	/** the transfer (TCP) to the master.
 	 * on the workers event base. */
 	struct comm_point* cp;
+	/** timeout for the transfer.
+	 * on the workers event base. */
+	struct comm_timer* timer;
 };
 
 /** list of addresses */
@@ -455,10 +473,11 @@ struct auth_zones* auth_zones_create(void);
  * @param az: auth zones structure
  * @param cfg: config to apply.
  * @param setup: if true, also sets up values in the auth zones structure
+ * @param is_rpz: set to 1 if at least one RPZ zone is configured.
  * @return false on failure.
  */
 int auth_zones_apply_cfg(struct auth_zones* az, struct config_file* cfg,
-	int setup);
+	int setup, int* is_rpz);
 
 /** initial pick up of worker timeouts, ties events to worker event loop
  * @param az: auth zones structure
@@ -647,6 +666,8 @@ int auth_xfer_transfer_http_callback(struct comm_point* c, void* arg, int err,
         struct comm_reply* repinfo);
 /** xfer probe timeout callback, part of task_probe */
 void auth_xfer_probe_timer_callback(void* arg);
+/** xfer transfer timeout callback, part of task_transfer */
+void auth_xfer_transfer_timer_callback(void* arg);
 /** mesh callback for task_probe on lookup of host names */
 void auth_xfer_probe_lookup_callback(void* arg, int rcode,
 	struct sldns_buffer* buf, enum sec_status sec, char* why_bogus,

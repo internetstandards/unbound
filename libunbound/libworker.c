@@ -74,6 +74,14 @@
 #include "sldns/sbuffer.h"
 #include "sldns/str2wire.h"
 
+#ifdef HAVE_TARGETCONDITIONALS_H
+#include <TargetConditionals.h>
+#endif
+
+#if defined(TARGET_OS_TV) || defined(TARGET_OS_WATCH)
+#undef HAVE_FORK
+#endif
+
 /** handle new query command for bg worker */
 static void handle_newq(struct libworker* w, uint8_t* buf, uint32_t len);
 
@@ -122,7 +130,6 @@ libworker_delete_event(struct libworker* w)
 static struct libworker*
 libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 {
-	unsigned int seed;
 	struct libworker* w = (struct libworker*)calloc(1, sizeof(*w));
 	struct config_file* cfg = ctx->env->cfg;
 	int* ports;
@@ -177,17 +184,13 @@ libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 	}
 	w->env->worker = (struct worker*)w;
 	w->env->probe_timer = NULL;
-	seed = (unsigned int)time(NULL) ^ (unsigned int)getpid() ^
-		(((unsigned int)w->thread_num)<<17);
-	seed ^= (unsigned int)w->env->alloc->next_id;
 	if(!w->is_bg || w->is_bg_thread) {
 		lock_basic_lock(&ctx->cfglock);
 	}
-	if(!(w->env->rnd = ub_initstate(seed, ctx->seed_rnd))) {
+	if(!(w->env->rnd = ub_initstate(ctx->seed_rnd))) {
 		if(!w->is_bg || w->is_bg_thread) {
 			lock_basic_unlock(&ctx->cfglock);
 		}
-		explicit_bzero(&seed, sizeof(seed));
 		libworker_delete(w);
 		return NULL;
 	}
@@ -207,7 +210,6 @@ libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 			hash_set_raninit((uint32_t)ub_random(w->env->rnd));
 		}
 	}
-	explicit_bzero(&seed, sizeof(seed));
 
 	if(eb)
 		w->base = comm_base_create_event(eb);
@@ -222,22 +224,21 @@ libworker_setup(struct ub_ctx* ctx, int is_bg, struct ub_event_base* eb)
 	}
 	numports = cfg_condense_ports(cfg, &ports);
 	if(numports == 0) {
-		int locked = !w->is_bg || w->is_bg_thread;
-		libworker_delete(w);
-		if(locked) {
+		if(!w->is_bg || w->is_bg_thread) {
 			lock_basic_unlock(&ctx->cfglock);
 		}
+		libworker_delete(w);
 		return NULL;
 	}
 	w->back = outside_network_create(w->base, cfg->msg_buffer_size,
 		(size_t)cfg->outgoing_num_ports, cfg->out_ifs,
 		cfg->num_out_ifs, cfg->do_ip4, cfg->do_ip6, 
-		cfg->do_tcp?cfg->outgoing_num_tcp:0,
+		cfg->do_tcp?cfg->outgoing_num_tcp:0, cfg->ip_dscp,
 		w->env->infra_cache, w->env->rnd, cfg->use_caps_bits_for_id,
 		ports, numports, cfg->unwanted_threshold,
 		cfg->outgoing_tcp_mss, &libworker_alloc_cleanup, w,
 		cfg->do_udp || cfg->udp_upstream_without_downstream, w->sslctx,
-		cfg->delay_close, NULL);
+		cfg->delay_close, cfg->tls_use_sni, NULL);
 	w->env->outnet = w->back;
 	if(!w->is_bg || w->is_bg_thread) {
 		lock_basic_unlock(&ctx->cfglock);
@@ -533,7 +534,7 @@ libworker_fillup_fg(struct ctx_query* q, int rcode, sldns_buffer* buf,
 	}
 
 	q->res->rcode = LDNS_RCODE_SERVFAIL;
-	q->msg_security = 0;
+	q->msg_security = sec_status_unchecked;
 	q->msg = memdup(sldns_buffer_begin(buf), sldns_buffer_limit(buf));
 	q->msg_len = sldns_buffer_limit(buf);
 	if(!q->msg) {
@@ -568,7 +569,6 @@ setup_qinfo_edns(struct libworker* w, struct ctx_query* q,
 	if(!qinfo->qname) {
 		return 0;
 	}
-	qinfo->local_alias = NULL;
 	edns->edns_present = 1;
 	edns->ext_rcode = 0;
 	edns->edns_version = 0;
@@ -1055,3 +1055,19 @@ wsvc_cron_cb(void* ATTR_UNUSED(arg))
         log_assert(0);
 }
 #endif /* UB_ON_WINDOWS */
+
+#ifdef USE_DNSTAP
+void dtio_tap_callback(int ATTR_UNUSED(fd), short ATTR_UNUSED(ev),
+	void* ATTR_UNUSED(arg))
+{
+	log_assert(0);
+}
+#endif
+
+#ifdef USE_DNSTAP
+void dtio_mainfdcallback(int ATTR_UNUSED(fd), short ATTR_UNUSED(ev),
+	void* ATTR_UNUSED(arg))
+{
+	log_assert(0);
+}
+#endif

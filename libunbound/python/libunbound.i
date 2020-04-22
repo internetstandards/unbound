@@ -33,12 +33,26 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+%begin %{
+/* store state of warning output, restored at later pop */
+#pragma GCC diagnostic push
+/* ignore gcc8 METH_NOARGS function cast warnings for swig function pointers */
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+%}
 %module unbound
 %{
+/* restore state of warning output, remove the functioncast ignore */
+#pragma GCC diagnostic pop
    #include <sys/types.h>
+   #ifdef HAVE_SYS_SOCKET_H
    #include <sys/socket.h>
+   #endif
+   #ifdef HAVE_NETINET_IN_H
    #include <netinet/in.h>
+   #endif
+   #ifdef HAVE_ARPA_INET_H
    #include <arpa/inet.h>
+   #endif
    #include "libunbound/unbound.h"
 %}
 
@@ -108,7 +122,7 @@
 
 %inline %{
   void ub_ctx_free_dbg (struct ub_ctx* c) {
-    printf("******** UB_CTX free 0x%lX ************\n", (long unsigned int)c);
+    printf("******** UB_CTX free 0x%p ************\n", c);
     ub_ctx_delete(c);
   }
 
@@ -228,6 +242,7 @@
     RR_TYPE_MAILA = 254,
     /**  any type (wildcard) */
     RR_TYPE_ANY = 255,
+    RR_TYPE_CAA = 257,
 
     /* RFC 4431, 5074, DNSSEC Lookaside Validation */
     RR_TYPE_DLV = 32769,
@@ -648,7 +663,7 @@ Result: ['74.125.43.147', '74.125.43.99', '74.125.43.103', '74.125.43.104']
  
 %inline %{
   void ub_resolve_free_dbg (struct ub_result* r) {
-    printf("******** UB_RESOLVE free 0x%lX ************\n", (long unsigned int)r);
+    printf("******** UB_RESOLVE free 0x%p ************\n", r);
     ub_resolve_free(r);
   }
 %} 
@@ -809,8 +824,7 @@ Result: ['74.125.43.147', '74.125.43.99', '74.125.43.103', '74.125.43.104']
        """
        return self.rcode2str[self.rcode]
 
-   __swig_getmethods__["rcode_str"] = _get_rcode_str
-   if _newclass:rcode_str = _swig_property(_get_rcode_str)
+   rcode_str = property(_get_rcode_str)
 
    def _get_raw_data(self):
        """Result data, a list of network order DNS rdata items. 
@@ -819,15 +833,13 @@ Result: ['74.125.43.147', '74.125.43.99', '74.125.43.103', '74.125.43.104']
        """
        return self._ub_result_data(self)
 
-   __swig_getmethods__["rawdata"] = _get_raw_data
    rawdata = property(_get_raw_data, doc="Returns raw data, a list of rdata items. To decode RAW data use the :attr:`data` attribute which returns an instance of :class:`ub_data` containing the conversion functions.")
 
    def _get_data(self):
        if not self.havedata: return None
        return ub_data(self._ub_result_data(self))
   
-   __swig_getmethods__["data"] = _get_data
-   __swig_getmethods__["packet"] = _packet
+   packet = property(_packet)
    data = property(_get_data, doc="Returns :class:`ub_data` instance containing various decoding functions or None")
 
 %}
