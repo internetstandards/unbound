@@ -3,6 +3,28 @@
 Unbound branch containing the internetnl module, used for connection test and
 interactive mail test on internet.nl.
 
+## HOW TO KEEP THE FORK UP-TO-DATE
+
+1. Clone the repository locally and set the upstream (for syncing with upstream):
+   ```
+   git remote add upstream https://github.com/NLnetLabs/unbound.git
+   ```
+
+2. If you need to sync with upstream on a previously cloned repo run:
+   ```
+   git fetch upstream
+   git checkout master
+   git merge upstream/master
+   git push
+   ```
+
+3. Remember to checkout the proper branch again since we don't want any changes
+   on master:
+   ```
+   git checkout internetnl
+   ```
+
+
 ## Installation
  - Make sure that `swig` >= 3.0 is installed on your system
 
