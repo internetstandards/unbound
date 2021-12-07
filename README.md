@@ -51,7 +51,7 @@ server:
 	local-zone: "test-ns-signed.<base-domain>" transparent
 	local-zone: "test-ns6-signed.<base-domain>" transparent
 	interface: 0.0.0.0
-	access-control: 0.0.0.0/0 allow_snoop
+	access-control: 0.0.0.0/0 allow_setrd
 	module-config: "internetnl iterator"
 
 auth-zone:
