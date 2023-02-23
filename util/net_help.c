@@ -38,6 +38,15 @@
  */
 
 #include "config.h"
+#ifdef HAVE_SYS_TYPES_H
+#  include <sys/types.h>
+#endif
+#ifdef HAVE_NET_IF_H
+#include <net/if.h>
+#endif
+#ifdef HAVE_NETIOAPI_H
+#include <netioapi.h>
+#endif
 #include "util/net_help.h"
 #include "util/log.h"
 #include "util/data/dname.h"
@@ -46,6 +55,7 @@
 #include "util/config_file.h"
 #include "sldns/parseutil.h"
 #include "sldns/wire2str.h"
+#include "sldns/str2wire.h"
 #include <fcntl.h>
 #ifdef HAVE_OPENSSL_SSL_H
 #include <openssl/ssl.h>
@@ -55,8 +65,14 @@
 #ifdef HAVE_OPENSSL_ERR_H
 #include <openssl/err.h>
 #endif
+#ifdef HAVE_OPENSSL_CORE_NAMES_H
+#include <openssl/core_names.h>
+#endif
 #ifdef USE_WINSOCK
 #include <wincrypt.h>
+#endif
+#ifdef HAVE_NGHTTP2_NGHTTP2_H
+#include <nghttp2/nghttp2.h>
 #endif
 
 /** max length of an IP address (the address portion) that we allow */
@@ -78,6 +94,32 @@ static struct tls_session_ticket_key {
 	unsigned char *aes_key;
 	unsigned char *hmac_key;
 } *ticket_keys;
+
+#ifdef HAVE_SSL
+/**
+ * callback TLS session ticket encrypt and decrypt
+ * For use with SSL_CTX_set_tlsext_ticket_key_cb or
+ * SSL_CTX_set_tlsext_ticket_key_evp_cb
+ * @param s: the SSL_CTX to use (from connect_sslctx_create())
+ * @param key_name: secret name, 16 bytes
+ * @param iv: up to EVP_MAX_IV_LENGTH.
+ * @param evp_ctx: the evp cipher context, function sets this.
+ * @param hmac_ctx: the hmac context, function sets this.
+ * 	with ..key_cb it is of type HMAC_CTX*
+ * 	with ..key_evp_cb it is of type EVP_MAC_CTX*
+ * @param enc: 1 is encrypt, 0 is decrypt
+ * @return 0 on no ticket, 1 for okay, and 2 for okay but renew the ticket
+ * 	(the ticket is decrypt only). and <0 for failures.
+ */
+int tls_session_ticket_key_cb(SSL *s, unsigned char* key_name,
+	unsigned char* iv, EVP_CIPHER_CTX *evp_ctx,
+#ifdef HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB
+	EVP_MAC_CTX *hmac_ctx,
+#else
+	HMAC_CTX* hmac_ctx,
+#endif
+	int enc);
+#endif /* HAVE_SSL */
 
 /* returns true is string addr is an ip6 specced address */
 int
@@ -191,12 +233,11 @@ log_addr(enum verbosity_value v, const char* str,
 	else	verbose(v, "%s %s port %d", str, dest, (int)port);
 }
 
-int 
+int
 extstrtoaddr(const char* str, struct sockaddr_storage* addr,
-	socklen_t* addrlen)
+	socklen_t* addrlen, int port)
 {
 	char* s;
-	int port = UNBOUND_DNS_PORT;
 	if((s=strchr(str, '@'))) {
 		char buf[MAX_ADDR_STRLEN];
 		if(s-str >= MAX_ADDR_STRLEN) {
@@ -212,7 +253,6 @@ extstrtoaddr(const char* str, struct sockaddr_storage* addr,
 	}
 	return ipstrtoaddr(str, port, addr, addrlen);
 }
-
 
 int 
 ipstrtoaddr(const char* ip, int port, struct sockaddr_storage* addr,
@@ -234,7 +274,10 @@ ipstrtoaddr(const char* ip, int port, struct sockaddr_storage* addr,
 				return 0;
 			(void)strlcpy(buf, ip, sizeof(buf));
 			buf[s-ip]=0;
-			sa->sin6_scope_id = (uint32_t)atoi(s+1);
+#ifdef HAVE_IF_NAMETOINDEX
+			if (!(sa->sin6_scope_id = if_nametoindex(s+1)))
+#endif /* HAVE_IF_NAMETOINDEX */
+				sa->sin6_scope_id = (uint32_t)atoi(s+1);
 			ip = buf;
 		}
 		if(inet_pton((int)sa->sin6_family, ip, &sa->sin6_addr) <= 0) {
@@ -289,7 +332,7 @@ static int ipdnametoaddr(uint8_t* dname, size_t dnamelen,
 	struct sockaddr_storage* addr, socklen_t* addrlen, int* af)
 {
 	uint8_t* ia;
-	size_t dnamelabs = dname_count_labels(dname);
+	int dnamelabs = dname_count_labels(dname);
 	uint8_t lablen;
 	char* e = NULL;
 	int z = 0;
@@ -433,6 +476,42 @@ int authextstrtoaddr(char* str, struct sockaddr_storage* addr,
 	}
 	*auth_name = NULL;
 	return ipstrtoaddr(str, port, addr, addrlen);
+}
+
+uint8_t* authextstrtodname(char* str, int* port, char** auth_name)
+{
+	char* s;
+	uint8_t* dname;
+	size_t dname_len;
+	*port = UNBOUND_DNS_PORT;
+	*auth_name = NULL;
+	if((s=strchr(str, '@'))) {
+		char* hash = strchr(s+1, '#');
+		if(hash) {
+			*auth_name = hash+1;
+		} else {
+			*auth_name = NULL;
+		}
+		*port = atoi(s+1);
+		if(*port == 0) {
+			if(!hash && strcmp(s+1,"0")!=0)
+				return 0;
+			if(hash && strncmp(s+1,"0#",2)!=0)
+				return 0;
+		}
+		*s = 0;
+		dname = sldns_str2wire_dname(str, &dname_len);
+		*s = '@';
+	} else if((s=strchr(str, '#'))) {
+		*port = UNBOUND_DNS_OVER_TLS_PORT;
+		*auth_name = s+1;
+		*s = 0;
+		dname = sldns_str2wire_dname(str, &dname_len);
+		*s = '#';
+	} else {
+		dname = sldns_str2wire_dname(str, &dname_len);
+	}
+	return dname;
 }
 
 /** store port number into sockaddr structure */
@@ -849,11 +928,32 @@ log_cert(unsigned level, const char* str, void* cert)
 	BIO_write(bio, &nul, (int)sizeof(nul));
 	len = BIO_get_mem_data(bio, &pp);
 	if(len != 0 && pp) {
+		/* reduce size of cert printout */
+		char* s;
+		while((s=strstr(pp, "  "))!=NULL)
+			memmove(s, s+1, strlen(s+1)+1);
+		while((s=strstr(pp, "\t\t"))!=NULL)
+			memmove(s, s+1, strlen(s+1)+1);
 		verbose(level, "%s: \n%s", str, pp);
 	}
 	BIO_free(bio);
 }
 #endif /* HAVE_SSL */
+
+#if defined(HAVE_SSL) && defined(HAVE_NGHTTP2) && defined(HAVE_SSL_CTX_SET_ALPN_SELECT_CB)
+static int alpn_select_cb(SSL* ATTR_UNUSED(ssl), const unsigned char** out,
+	unsigned char* outlen, const unsigned char* in, unsigned int inlen,
+	void* ATTR_UNUSED(arg))
+{
+	int rv = nghttp2_select_next_protocol((unsigned char **)out, outlen, in,
+		inlen);
+	if(rv == -1) {
+		return SSL_TLSEXT_ERR_NOACK;
+	}
+	/* either http/1.1 or h2 selected */
+	return SSL_TLSEXT_ERR_OK;
+}
+#endif
 
 int
 listen_sslctx_setup(void* ctxt)
@@ -898,9 +998,12 @@ listen_sslctx_setup(void* ctxt)
 	}
 #endif
 #if defined(SHA256_DIGEST_LENGTH) && defined(USE_ECDSA)
+	/* if we detect system-wide crypto policies, use those */
+	if (access( "/etc/crypto-policies/config", F_OK ) != 0 ) {
 	/* if we have sha256, set the cipher list to have no known vulns */
-	if(!SSL_CTX_set_cipher_list(ctx, "TLS13-CHACHA20-POLY1305-SHA256:TLS13-AES-256-GCM-SHA384:TLS13-AES-128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"))
-		log_crypto_err("could not set cipher list with SSL_CTX_set_cipher_list");
+		if(!SSL_CTX_set_cipher_list(ctx, "TLS13-CHACHA20-POLY1305-SHA256:TLS13-AES-256-GCM-SHA384:TLS13-AES-128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256"))
+			log_crypto_err("could not set cipher list with SSL_CTX_set_cipher_list");
+	}
 #endif
 
 	if((SSL_CTX_set_options(ctx, SSL_OP_CIPHER_SERVER_PREFERENCE) &
@@ -912,6 +1015,9 @@ listen_sslctx_setup(void* ctxt)
 
 #ifdef HAVE_SSL_CTX_SET_SECURITY_LEVEL
 	SSL_CTX_set_security_level(ctx, 0);
+#endif
+#if defined(HAVE_SSL_CTX_SET_ALPN_SELECT_CB) && defined(HAVE_NGHTTP2)
+	SSL_CTX_set_alpn_select_cb(ctx, alpn_select_cb, NULL);
 #endif
 #else
 	(void)ctxt;
@@ -1054,10 +1160,11 @@ add_WIN_cacerts_to_openssl_store(SSL_CTX* tls_ctx)
 			(const unsigned char **)&pTargetCert->pbCertEncoded,
 			pTargetCert->cbCertEncoded);
 		if (!cert1) {
+			unsigned long error = ERR_get_error();
 			/* return error if a cert fails */
 			verbose(VERB_ALGO, "%s %d:%s",
 				"Unable to parse certificate in memory",
-				(int)ERR_get_error(), ERR_error_string(ERR_get_error(), NULL));
+				(int)error, ERR_error_string(error, NULL));
 			return 0;
 		}
 		else {
@@ -1068,10 +1175,11 @@ add_WIN_cacerts_to_openssl_store(SSL_CTX* tls_ctx)
 				/* Ignore error X509_R_CERT_ALREADY_IN_HASH_TABLE which means the
 				* certificate is already in the store.  */
 				if(ERR_GET_LIB(error) != ERR_LIB_X509 ||
-				   ERR_GET_REASON(error) != X509_R_CERT_ALREADY_IN_HASH_TABLE) {
+					ERR_GET_REASON(error) != X509_R_CERT_ALREADY_IN_HASH_TABLE) {
+					error = ERR_get_error();
 					verbose(VERB_ALGO, "%s %d:%s\n",
-					    "Error adding certificate", (int)ERR_get_error(),
-					     ERR_error_string(ERR_get_error(), NULL));
+					    "Error adding certificate", (int)error,
+					     ERR_error_string(error, NULL));
 					X509_free(cert1);
 					return 0;
 				}
@@ -1122,6 +1230,7 @@ void* connect_sslctx_create(char* key, char* pem, char* verifypem, int wincert)
 	if((SSL_CTX_set_options(ctx, SSL_OP_NO_RENEGOTIATION) &
 		SSL_OP_NO_RENEGOTIATION) != SSL_OP_NO_RENEGOTIATION) {
 		log_crypto_err("could not set SSL_OP_NO_RENEGOTIATION");
+		SSL_CTX_free(ctx);
 		return 0;
 	}
 #endif
@@ -1162,7 +1271,13 @@ void* connect_sslctx_create(char* key, char* pem, char* verifypem, int wincert)
 			}
 		}
 #else
-		(void)wincert;
+		if(wincert) {
+			if(!SSL_CTX_set_default_verify_paths(ctx)) {
+				log_crypto_err("error in default_verify_paths");
+				SSL_CTX_free(ctx);
+				return NULL;
+			}
+		}
 #endif
 		SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
 	}
@@ -1240,6 +1355,7 @@ int set_auth_name_on_ssl(void* ssl, char* auth_name, int use_sni)
 	}
 #else
 	(void)ssl;
+	(void)use_sni;
 #endif
 #ifdef HAVE_SSL_SET1_HOST
 	SSL_set_verify(ssl, SSL_VERIFY_PEER, NULL);
@@ -1387,10 +1503,17 @@ int listen_sslctx_setup_ticket_keys(void* sslctx, struct config_strlist* tls_ses
 	}
 	/* terminate array with NULL key name entry */
 	keys->key_name = NULL;
+#  ifdef HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB
+	if(SSL_CTX_set_tlsext_ticket_key_evp_cb(sslctx, tls_session_ticket_key_cb) == 0) {
+		log_err("no support for TLS session ticket");
+		return 0;
+	}
+#  else
 	if(SSL_CTX_set_tlsext_ticket_key_cb(sslctx, tls_session_ticket_key_cb) == 0) {
 		log_err("no support for TLS session ticket");
 		return 0;
 	}
+#  endif
 	return 1;
 #else
 	(void)sslctx;
@@ -1400,13 +1523,27 @@ int listen_sslctx_setup_ticket_keys(void* sslctx, struct config_strlist* tls_ses
 
 }
 
-int tls_session_ticket_key_cb(void *ATTR_UNUSED(sslctx), unsigned char* key_name, unsigned char* iv, void *evp_sctx, void *hmac_ctx, int enc)
+#ifdef HAVE_SSL
+int tls_session_ticket_key_cb(SSL *ATTR_UNUSED(sslctx), unsigned char* key_name,
+	unsigned char* iv, EVP_CIPHER_CTX *evp_sctx,
+#ifdef HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB
+	EVP_MAC_CTX *hmac_ctx,
+#else
+	HMAC_CTX* hmac_ctx,
+#endif
+	int enc)
 {
 #ifdef HAVE_SSL
+#  ifdef HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB
+	OSSL_PARAM params[3];
+#  else
 	const EVP_MD *digest;
+#  endif
 	const EVP_CIPHER *cipher;
 	int evp_cipher_length;
+#  ifndef HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB
 	digest = EVP_sha256();
+#  endif
 	cipher = EVP_aes_256_cbc();
 	evp_cipher_length = EVP_CIPHER_iv_length(cipher);
 	if( enc == 1 ) {
@@ -1421,7 +1558,18 @@ int tls_session_ticket_key_cb(void *ATTR_UNUSED(sslctx), unsigned char* key_name
 			verbose(VERB_CLIENT, "EVP_EncryptInit_ex failed");
 			return -1;
 		}
-#ifndef HMAC_INIT_EX_RETURNS_VOID
+#ifdef HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB
+		params[0] = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY,
+			ticket_keys->hmac_key, 32);
+		params[1] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
+			"sha256", 0);
+		params[2] = OSSL_PARAM_construct_end();
+#ifdef HAVE_EVP_MAC_CTX_SET_PARAMS
+		EVP_MAC_CTX_set_params(hmac_ctx, params);
+#else
+		EVP_MAC_set_ctx_params(hmac_ctx, params);
+#endif
+#elif !defined(HMAC_INIT_EX_RETURNS_VOID)
 		if (HMAC_Init_ex(hmac_ctx, ticket_keys->hmac_key, 32, digest, NULL) != 1) {
 			verbose(VERB_CLIENT, "HMAC_Init_ex failed");
 			return -1;
@@ -1445,7 +1593,18 @@ int tls_session_ticket_key_cb(void *ATTR_UNUSED(sslctx), unsigned char* key_name
 			return 0;
 		}
 
-#ifndef HMAC_INIT_EX_RETURNS_VOID
+#ifdef HAVE_SSL_CTX_SET_TLSEXT_TICKET_KEY_EVP_CB
+		params[0] = OSSL_PARAM_construct_octet_string(OSSL_KDF_PARAM_KEY,
+			key->hmac_key, 32);
+		params[1] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
+			"sha256", 0);
+		params[2] = OSSL_PARAM_construct_end();
+#ifdef HAVE_EVP_MAC_CTX_SET_PARAMS
+		EVP_MAC_CTX_set_params(hmac_ctx, params);
+#else
+		EVP_MAC_set_ctx_params(hmac_ctx, params);
+#endif
+#elif !defined(HMAC_INIT_EX_RETURNS_VOID)
 		if (HMAC_Init_ex(hmac_ctx, key->hmac_key, 32, digest, NULL) != 1) {
 			verbose(VERB_CLIENT, "HMAC_Init_ex failed");
 			return -1;
@@ -1470,6 +1629,7 @@ int tls_session_ticket_key_cb(void *ATTR_UNUSED(sslctx), unsigned char* key_name
 	return 0;
 #endif
 }
+#endif /* HAVE_SSL */
 
 void
 listen_sslctx_delete_ticket_keys(void)
@@ -1488,3 +1648,30 @@ listen_sslctx_delete_ticket_keys(void)
 	free(ticket_keys);
 	ticket_keys = NULL;
 }
+
+#  ifndef USE_WINSOCK
+char*
+sock_strerror(int errn)
+{
+	return strerror(errn);
+}
+
+void
+sock_close(int socket)
+{
+	close(socket);
+}
+
+#  else
+char*
+sock_strerror(int ATTR_UNUSED(errn))
+{
+	return wsa_strerror(WSAGetLastError());
+}
+
+void
+sock_close(int socket)
+{
+	closesocket(socket);
+}
+#  endif /* USE_WINSOCK */

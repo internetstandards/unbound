@@ -31,11 +31,13 @@
 /unbound.h
 /asynclook
 /delayer
+/dohclient
 /lock-verify
 /memstats
 /perf
 /petal
 /pktview
+/readzone
 /streamtcp
 /unbound-dnstap-socket
 /testbound

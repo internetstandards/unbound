@@ -176,6 +176,8 @@ int respip_merge_cname(struct reply_info* base_rep,
  *   will be set (or intact) accordingly but the modified reply won't be built.
  * @param az: auth zones containing RPZ information.
  * @param region: allocator to build *new_repp.
+ * @param rpz_passthru: keeps track of query state can have passthru that
+ *   stops further rpz processing. Or NULL for cached answer processing.
  * @return 1 on success, 0 on error.
  */
 int respip_rewrite_reply(const struct query_info* qinfo,
@@ -183,7 +185,8 @@ int respip_rewrite_reply(const struct query_info* qinfo,
 	const struct reply_info *rep, struct reply_info** new_repp,
 	struct respip_action_info* actinfo,
 	struct ub_packed_rrset_key** alias_rrset,
-	int search_only, struct regional* region, struct auth_zones* az);
+	int search_only, struct regional* region, struct auth_zones* az,
+	int* rpz_passthru);
 
 /**
  * Get the response-ip function block.
@@ -248,11 +251,13 @@ int respip_set_is_empty(const struct respip_set* set);
  * @param local_alias: set to a local alias if the query matches an alias in
  *  a local zone.  In this case its owner name will be considered the actual
  *  query name.
- * @param repinfo: reply info containing the client's source address and port.
+ * @param addr: the client's source address and port.
+ * @param addrlen: the client's source address length.
  */
 void respip_inform_print(struct respip_action_info* respip_actinfo,
 	uint8_t* qname, uint16_t qtype, uint16_t qclass,
-	struct local_rrset* local_alias, struct comm_reply* repinfo);
+	struct local_rrset* local_alias, struct sockaddr_storage* addr,
+	socklen_t addrlen);
 
 /**
  * Find resp_addr in tree, create and add to tree if it does not exist.
@@ -294,4 +299,7 @@ respip_enter_rr(struct regional* region, struct resp_addr* raddr,
  */
 void
 respip_sockaddr_delete(struct respip_set* set, struct resp_addr* node);
+
+struct ub_packed_rrset_key*
+respip_copy_rrset(const struct ub_packed_rrset_key* key, struct regional* region);
 #endif	/* RESPIP_RESPIP_H */

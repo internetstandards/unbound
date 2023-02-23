@@ -1,5 +1,5 @@
 /*
- * checkconf/unbound-control.c - remote control utility for unbound.
+ * smallapp/unbound-control.c - remote control utility for unbound.
  *
  * Copyright (c) 2008, NLnet Labs. All rights reserved.
  *
@@ -63,6 +63,7 @@
 #include "sldns/wire2str.h"
 #include "sldns/pkthdr.h"
 #include "services/rpz.h"
+#include "services/listen_dnsport.h"
 
 #ifdef HAVE_SYS_IPC_H
 #include "sys/ipc.h"
@@ -82,6 +83,9 @@ static void usage(void) ATTR_NORETURN;
 static void ssl_err(const char* s) ATTR_NORETURN;
 static void ssl_path_err(const char* s, const char *path) ATTR_NORETURN;
 
+/** timeout to wait for connection over stream, in msec */
+#define UNBOUND_CONTROL_CONNECT_TIMEOUT 5000
+
 /** Give unbound-control usage, and exit (1). */
 static void
 usage(void)
@@ -98,6 +102,12 @@ usage(void)
 	printf("  stop				stops the server\n");
 	printf("  reload			reloads the server\n");
 	printf("  				(this flushes data, stats, requestlist)\n");
+	printf("  reload_keep_cache		reloads the server but tries to\n");
+	printf("  				keep the RRset and message cache\n");
+	printf("  				if (re)configuration allows for it.\n");
+	printf("  				That means the caches sizes and\n");
+	printf("  				the number of threads must not\n");
+	printf("  				change between reloads.\n");
 	printf("  stats				print statistics\n");
 	printf("  stats_noreset			peek at statistics\n");
 #ifdef HAVE_SHMGET
@@ -151,9 +161,9 @@ usage(void)
 	printf("  ratelimit_list [+a]		list ratelimited domains\n");
 	printf("  ip_ratelimit_list [+a]	list ratelimited ip addresses\n");
 	printf("		+a		list all, also not ratelimited\n");
-	printf("  list_auth_zones		list auth zones\n");
-	printf("  auth_zone_reload zone		reload auth zone from zonefile\n");
-	printf("  auth_zone_transfer zone	transfer auth zone from master\n");
+	printf("  list_auth_zones		list auth zones (includes RPZ zones)\n");
+	printf("  auth_zone_reload zone		reload auth zone (or RPZ zone) from zonefile\n");
+	printf("  auth_zone_transfer zone	transfer auth zone (or RPZ zone) from master\n");
 	printf("  view_list_local_zones	view	list local-zones in view\n");
 	printf("  view_list_local_data	view	list local-data RRs in view\n");
 	printf("  view_local_zone view name type  	add local-zone in view\n");
@@ -164,6 +174,9 @@ usage(void)
 	printf("  view_local_data_remove view name  	remove local-data in view\n");
 	printf("  view_local_datas_remove view 		remove list of local-data from view\n");
 	printf("  					one entry per line read from stdin\n");
+	printf("  rpz_enable zone		Enable the RPZ zone if it had previously\n");
+	printf("  				been disabled\n");
+	printf("  rpz_disable zone		Disable the RPZ zone\n");
 	printf("Version %s\n", PACKAGE_VERSION);
 	printf("BSD licensed, see LICENSE in source package for details.\n");
 	printf("Report bugs to %s\n", PACKAGE_BUGREPORT);
@@ -173,15 +186,13 @@ usage(void)
 #ifdef HAVE_SHMGET
 /** what to put on statistics lines between var and value, ": " or "=" */
 #define SQ "="
-/** if true, inhibits a lot of =0 lines from the stats output */
-static const int inhibit_zero = 1;
 /** divide sum of timers to get average */
 static void
 timeval_divide(struct timeval* avg, const struct timeval* sum, long long d)
 {
 #ifndef S_SPLINT_S
 	size_t leftover;
-	if(d == 0) {
+	if(d <= 0) {
 		avg->tv_sec = 0;
 		avg->tv_usec = 0;
 		return;
@@ -190,7 +201,13 @@ timeval_divide(struct timeval* avg, const struct timeval* sum, long long d)
 	avg->tv_usec = sum->tv_usec / d;
 	/* handle fraction from seconds divide */
 	leftover = sum->tv_sec - avg->tv_sec*d;
-	avg->tv_usec += (leftover*1000000)/d;
+	if(leftover <= 0)
+		leftover = 0;
+	avg->tv_usec += (((long long)leftover)*((long long)1000000))/d;
+	if(avg->tv_sec < 0)
+		avg->tv_sec = 0;
+	if(avg->tv_usec < 0)
+		avg->tv_usec = 0;
 #endif
 }
 
@@ -268,6 +285,9 @@ static void print_mem(struct ub_shm_stat_info* shm_stat,
 #ifdef USE_IPSECMOD
 	PR_LL("mem.mod.ipsecmod", shm_stat->mem.ipsecmod);
 #endif
+#ifdef WITH_DYNLIBMODULE
+	PR_LL("mem.mod.dynlib", shm_stat->mem.dynlib);
+#endif
 #ifdef USE_DNSCRYPT
 	PR_LL("mem.cache.dnscrypt_shared_secret",
 		shm_stat->mem.dnscrypt_shared_secret);
@@ -275,6 +295,8 @@ static void print_mem(struct ub_shm_stat_info* shm_stat,
 		shm_stat->mem.dnscrypt_nonce);
 #endif
 	PR_LL("mem.streamwait", s->svr.mem_stream_wait);
+	PR_LL("mem.http.query_buffer", s->svr.mem_http2_query_buffer);
+	PR_LL("mem.http.response_buffer", s->svr.mem_http2_response_buffer);
 }
 
 /** print histogram */
@@ -298,7 +320,7 @@ static void print_hist(struct ub_stats_info* s)
 }
 
 /** print extended */
-static void print_extended(struct ub_stats_info* s)
+static void print_extended(struct ub_stats_info* s, int inhibit_zero)
 {
 	int i;
 	char nm[16];
@@ -336,9 +358,11 @@ static void print_extended(struct ub_stats_info* s)
 	/* transport */
 	PR_UL("num.query.tcp", s->svr.qtcp);
 	PR_UL("num.query.tcpout", s->svr.qtcp_outgoing);
+	PR_UL("num.query.udpout", s->svr.qudp_outgoing);
 	PR_UL("num.query.tls", s->svr.qtls);
 	PR_UL("num.query.tls_resume", s->svr.qtls_resume);
 	PR_UL("num.query.ipv6", s->svr.qipv6);
+	PR_UL("num.query.https", s->svr.qhttps);
 
 	/* flags */
 	PR_UL("num.query.flags.QR", s->svr.qbit_QR);
@@ -419,13 +443,13 @@ static void do_stats_shm(struct config_file* cfg, struct ub_stats_info* stats,
 	if(cfg->stat_extended) {
 		print_mem(shm_stat, &stats[0]);
 		print_hist(stats);
-		print_extended(stats);
+		print_extended(stats, cfg->stat_inhibit_zero);
 	}
 }
 #endif /* HAVE_SHMGET */
 
 /** print statistics from shm memory segment */
-static void print_stats_shm(const char* cfgfile)
+static void print_stats_shm(const char* cfgfile, int quiet)
 {
 #ifdef HAVE_SHMGET
 	struct config_file* cfg;
@@ -455,8 +479,11 @@ static void print_stats_shm(const char* cfgfile)
 		fatal_exit("shmat(%d): %s", id_arr, strerror(errno));
 	}
 
-	/* print the stats */
-	do_stats_shm(cfg, stats, shm_stat);
+
+	if(!quiet) {
+		/* print the stats */
+		do_stats_shm(cfg, stats, shm_stat);
+	}
 
 	/* shutdown */
 	shmdt(shm_stat);
@@ -464,6 +491,7 @@ static void print_stats_shm(const char* cfgfile)
 	config_delete(cfg);
 #else
 	(void)cfgfile;
+	(void)quiet;
 #endif /* HAVE_SHMGET */
 }
 
@@ -480,9 +508,7 @@ static void ssl_path_err(const char* s, const char *path)
 {
 	unsigned long err;
 	err = ERR_peek_error();
-	if (ERR_GET_LIB(err) == ERR_LIB_SYS &&
-		(ERR_GET_FUNC(err) == SYS_F_FOPEN ||
-		 ERR_GET_FUNC(err) == SYS_F_FREAD) ) {
+	if(ERR_GET_LIB(err) == ERR_LIB_SYS) {
 		fprintf(stderr, "error: %s\n%s: %s\n",
 			s, path, ERR_reason_error_string(err));
 		exit(1);
@@ -524,11 +550,11 @@ setup_ctx(struct config_file* cfg)
 #endif
 	if(!SSL_CTX_use_certificate_chain_file(ctx,c_cert))
 		ssl_path_err("Error setting up SSL_CTX client cert", c_cert);
-	if (!SSL_CTX_use_PrivateKey_file(ctx,c_key,SSL_FILETYPE_PEM))
+	if(!SSL_CTX_use_PrivateKey_file(ctx,c_key,SSL_FILETYPE_PEM))
 		ssl_path_err("Error setting up SSL_CTX client key", c_key);
-	if (!SSL_CTX_check_private_key(ctx))
+	if(!SSL_CTX_check_private_key(ctx))
 		ssl_err("Error setting up SSL_CTX client key");
-	if (SSL_CTX_load_verify_locations(ctx, s_cert, NULL) != 1)
+	if(SSL_CTX_load_verify_locations(ctx, s_cert, NULL) != 1)
 		ssl_path_err("Error setting up SSL_CTX verify, server cert",
 			     s_cert);
 	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
@@ -539,6 +565,30 @@ setup_ctx(struct config_file* cfg)
 	return ctx;
 }
 
+/** check connect error */
+static void
+checkconnecterr(int err, const char* svr, struct sockaddr_storage* addr,
+	socklen_t addrlen, int statuscmd, int useport)
+{
+#ifndef USE_WINSOCK
+	if(!useport) log_err("connect: %s for %s", strerror(err), svr);
+	else log_err_addr("connect", strerror(err), addr, addrlen);
+	if(err == ECONNREFUSED && statuscmd) {
+		printf("unbound is stopped\n");
+		exit(3);
+	}
+#else
+	int wsaerr = err;
+	if(!useport) log_err("connect: %s for %s", wsa_strerror(wsaerr), svr);
+	else log_err_addr("connect", wsa_strerror(wsaerr), addr, addrlen);
+	if(wsaerr == WSAECONNREFUSED && statuscmd) {
+		printf("unbound is stopped\n");
+		exit(3);
+	}
+#endif
+	exit(1);
+}
+
 /** contact the server with TCP connect */
 static int
 contact_server(const char* svr, struct config_file* cfg, int statuscmd)
@@ -547,10 +597,27 @@ contact_server(const char* svr, struct config_file* cfg, int statuscmd)
 	socklen_t addrlen;
 	int addrfamily = 0, proto = IPPROTO_TCP;
 	int fd, useport = 1;
+	char** rcif = NULL;
+	int num_rcif = 0;
 	/* use svr or the first config entry */
 	if(!svr) {
 		if(cfg->control_ifs.first) {
-			svr = cfg->control_ifs.first->str;
+			struct sockaddr_storage addr2;
+			socklen_t addrlen2;
+			if(extstrtoaddr(cfg->control_ifs.first->str, &addr2,
+				&addrlen2, UNBOUND_DNS_PORT)) {
+				svr = cfg->control_ifs.first->str;
+			} else {
+				if(!resolve_interface_names(NULL, 0,
+					cfg->control_ifs.first, &rcif,
+					&num_rcif)) {
+					fatal_exit("could not resolve interface names");
+				}
+				if(rcif == NULL || num_rcif == 0) {
+					fatal_exit("no control interfaces");
+				}
+				svr = rcif[0];
+			}
 		} else if(cfg->do_ip4) {
 			svr = "127.0.0.1";
 		} else {
@@ -566,7 +633,7 @@ contact_server(const char* svr, struct config_file* cfg, int statuscmd)
 			svr = "::1";
 	}
 	if(strchr(svr, '@')) {
-		if(!extstrtoaddr(svr, &addr, &addrlen))
+		if(!extstrtoaddr(svr, &addr, &addrlen, UNBOUND_DNS_PORT))
 			fatal_exit("could not parse IP@port: %s", svr);
 #ifdef HAVE_SYS_UN_H
 	} else if(svr[0] == '/') {
@@ -590,32 +657,78 @@ contact_server(const char* svr, struct config_file* cfg, int statuscmd)
 		addrfamily = addr_is_ip6(&addr, addrlen)?PF_INET6:PF_INET;
 	fd = socket(addrfamily, SOCK_STREAM, proto);
 	if(fd == -1) {
-#ifndef USE_WINSOCK
-		fatal_exit("socket: %s", strerror(errno));
-#else
-		fatal_exit("socket: %s", wsa_strerror(WSAGetLastError()));
-#endif
+		fatal_exit("socket: %s", sock_strerror(errno));
 	}
+	fd_set_nonblock(fd);
 	if(connect(fd, (struct sockaddr*)&addr, addrlen) < 0) {
 #ifndef USE_WINSOCK
-		int err = errno;
-		if(!useport) log_err("connect: %s for %s", strerror(err), svr);
-		else log_err_addr("connect", strerror(err), &addr, addrlen);
-		if(err == ECONNREFUSED && statuscmd) {
-			printf("unbound is stopped\n");
-			exit(3);
-		}
-#else
-		int wsaerr = WSAGetLastError();
-		if(!useport) log_err("connect: %s for %s", wsa_strerror(wsaerr), svr);
-		else log_err_addr("connect", wsa_strerror(wsaerr), &addr, addrlen);
-		if(wsaerr == WSAECONNREFUSED && statuscmd) {
-			printf("unbound is stopped\n");
-			exit(3);
+#ifdef EINPROGRESS
+		if(errno != EINPROGRESS) {
+			checkconnecterr(errno, svr, &addr,
+				addrlen, statuscmd, useport);
 		}
 #endif
-		exit(1);
+#else
+		if(WSAGetLastError() != WSAEINPROGRESS &&
+			WSAGetLastError() != WSAEWOULDBLOCK) {
+			checkconnecterr(WSAGetLastError(), svr, &addr,
+				addrlen, statuscmd, useport);
+		}
+#endif
 	}
+	while(1) {
+		fd_set rset, wset, eset;
+		struct timeval tv;
+		FD_ZERO(&rset);
+		FD_SET(FD_SET_T fd, &rset);
+		FD_ZERO(&wset);
+		FD_SET(FD_SET_T fd, &wset);
+		FD_ZERO(&eset);
+		FD_SET(FD_SET_T fd, &eset);
+		tv.tv_sec = UNBOUND_CONTROL_CONNECT_TIMEOUT/1000;
+		tv.tv_usec= (UNBOUND_CONTROL_CONNECT_TIMEOUT%1000)*1000;
+		if(select(fd+1, &rset, &wset, &eset, &tv) == -1) {
+			fatal_exit("select: %s", sock_strerror(errno));
+		}
+		if(!FD_ISSET(fd, &rset) && !FD_ISSET(fd, &wset) &&
+			!FD_ISSET(fd, &eset)) {
+			fatal_exit("timeout: could not connect to server");
+		} else {
+			/* check nonblocking connect error */
+			int error = 0;
+			socklen_t len = (socklen_t)sizeof(error);
+			if(getsockopt(fd, SOL_SOCKET, SO_ERROR, (void*)&error,
+				&len) < 0) {
+#ifndef USE_WINSOCK
+				error = errno; /* on solaris errno is error */
+#else
+				error = WSAGetLastError();
+#endif
+			}
+			if(error != 0) {
+#ifndef USE_WINSOCK
+#ifdef EINPROGRESS
+				if(error == EINPROGRESS)
+					continue; /* try again later */
+#endif
+#ifdef EWOULDBLOCK
+				if(error == EWOULDBLOCK)
+					continue; /* try again later */
+#endif
+#else
+				if(error == WSAEINPROGRESS)
+					continue; /* try again later */
+				if(error == WSAEWOULDBLOCK)
+					continue; /* try again later */
+#endif
+				checkconnecterr(error, svr, &addr, addrlen,
+					statuscmd, useport);
+			}
+		}
+		break;
+	}
+	fd_set_block(fd);
+	config_del_strarray(rcif, num_rcif);
 	return fd;
 }
 
@@ -678,11 +791,7 @@ remote_read(SSL* ssl, int fd, char* buf, size_t len)
 				/* EOF */
 				return 0;
 			}
-#ifndef USE_WINSOCK
-			fatal_exit("could not recv: %s", strerror(errno));
-#else
-			fatal_exit("could not recv: %s", wsa_strerror(WSAGetLastError()));
-#endif
+			fatal_exit("could not recv: %s", sock_strerror(errno));
 		}
 		buf[rr] = 0;
 	}
@@ -698,11 +807,7 @@ remote_write(SSL* ssl, int fd, const char* buf, size_t len)
 			ssl_err("could not SSL_write");
 	} else {
 		if(send(fd, buf, len, 0) < (ssize_t)len) {
-#ifndef USE_WINSOCK
-			fatal_exit("could not send: %s", strerror(errno));
-#else
-			fatal_exit("could not send: %s", wsa_strerror(WSAGetLastError()));
-#endif
+			fatal_exit("could not send: %s", sock_strerror(errno));
 		}
 	}
 }
@@ -784,8 +889,9 @@ go_cmd(SSL* ssl, int fd, int quiet, int argc, char* argv[])
 		if(first_line && strncmp(buf, "error", 5) == 0) {
 			printf("%s", buf);
 			was_error = 1;
-		} else if (!quiet)
+		} else if(!quiet) {
 			printf("%s", buf);
+		}
 
 		first_line = 0;
 	}
@@ -821,11 +927,7 @@ go(const char* cfgfile, char* svr, int quiet, int argc, char* argv[])
 	ret = go_cmd(ssl, fd, quiet, argc, argv);
 
 	if(ssl) SSL_free(ssl);
-#ifndef USE_WINSOCK
-	close(fd);
-#else
-	closesocket(fd);
-#endif
+	sock_close(fd);
 	if(ctx) SSL_CTX_free(ctx);
 	config_delete(cfg);
 	return ret;
@@ -852,9 +954,9 @@ int main(int argc, char* argv[])
 	extern int check_locking_order;
 	check_locking_order = 0;
 #endif /* USE_THREAD_DEBUG */
+	checklock_start();
 	log_ident_set("unbound-control");
 	log_init(NULL, 0, NULL);
-	checklock_start();
 #ifdef USE_WINSOCK
 	/* use registry config file in preference to compiletime location */
 	if(!(cfgfile=w_lookup_reg_str("Software\\Unbound", "ConfigFile")))
@@ -883,7 +985,7 @@ int main(int argc, char* argv[])
 	if(argc == 0)
 		usage();
 	if(argc >= 1 && strcmp(argv[0], "start")==0) {
-#if defined(TARGET_OS_TV) || defined(TARGET_OS_WATCH)
+#if (defined(TARGET_OS_TV) && TARGET_OS_TV) || (defined(TARGET_OS_WATCH) && TARGET_OS_WATCH)
 		fatal_exit("could not exec unbound: %s",
 			strerror(ENOSYS));
 #else
@@ -895,7 +997,7 @@ int main(int argc, char* argv[])
 #endif
 	}
 	if(argc >= 1 && strcmp(argv[0], "stats_shm")==0) {
-		print_stats_shm(cfgfile);
+		print_stats_shm(cfgfile, quiet);
 		return 0;
 	}
 	check_args_for_listcmd(argc, argv);

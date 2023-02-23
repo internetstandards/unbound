@@ -20,6 +20,7 @@
  * called to perform operations on queries.
  */
    #include <sys/types.h>
+   #include <time.h>
    #ifdef HAVE_SYS_SOCKET_H
    #include <sys/socket.h>
    #endif
@@ -314,16 +315,16 @@ struct packed_rrset_data {
     class RRSetData_RRLen:
         def __init__(self, obj): self.obj = obj
         def __getitem__(self, index): return _unboundmodule._get_data_rr_len(self.obj, index)
-        def __len__(self): return obj.count + obj.rrsig_count
+        def __len__(self): return self.obj.count + self.obj.rrsig_count
     class RRSetData_RRTTL:
         def __init__(self, obj): self.obj = obj
         def __getitem__(self, index): return _unboundmodule._get_data_rr_ttl(self.obj, index)
         def __setitem__(self, index, value): _unboundmodule._set_data_rr_ttl(self.obj, index, value)
-        def __len__(self): return obj.count + obj.rrsig_count
+        def __len__(self): return self.obj.count + self.obj.rrsig_count
     class RRSetData_RRData:
         def __init__(self, obj): self.obj = obj
         def __getitem__(self, index): return _unboundmodule._get_data_rr_data(self.obj, index)
-        def __len__(self): return obj.count + obj.rrsig_count
+        def __len__(self): return self.obj.count + self.obj.rrsig_count
 %}
 
 %inline %{
@@ -404,12 +405,12 @@ struct dns_msg {
     class ReplyInfo_RRSet:
         def __init__(self, obj): self.obj = obj
         def __getitem__(self, index): return _unboundmodule._rrset_rrsets_get(self.obj, index)
-        def __len__(self): return obj.rrset_count
+        def __len__(self): return self.obj.rrset_count
 
     class ReplyInfo_Ref:
         def __init__(self, obj): self.obj = obj
         def __getitem__(self, index): return _unboundmodule._rrset_ref_get(self.obj, index)
-        def __len__(self): return obj.rrset_count
+        def __len__(self): return self.obj.rrset_count
 %}
 
 %inline %{
@@ -608,9 +609,9 @@ struct mesh_reply {
    struct comm_reply query_reply;
 };
 
-%rename(_addr) comm_reply::addr;
+%rename(_addr) comm_reply::client_addr;
 struct comm_reply {
-   struct sockaddr_storage addr;
+   struct sockaddr_storage client_addr;
 };
 
 %extend comm_reply {
@@ -677,11 +678,14 @@ struct edns_data {
     uint8_t edns_version;
     uint16_t bits;
     uint16_t udp_size;
-    struct edns_option* opt_list;
+    struct edns_option* opt_list_in;
+    struct edns_option* opt_list_out;
+    struct edns_option* opt_list_inplace_cb_out;
+    uint16_t padding_block_size;
 };
 %inline %{
     struct edns_option** _edns_data_opt_list_get(struct edns_data* edns) {
-       return &edns->opt_list;
+       return &edns->opt_list_in;
     }
 %}
 %extend edns_data {
@@ -696,6 +700,8 @@ struct edns_data {
 /* ************************************************************************************ *
    Structure module_env
  * ************************************************************************************ */
+%rename(_now) module_env::now;
+%rename(_now_tv) module_env::now_tv;
 struct module_env {
     struct config_file* cfg;
     struct slabhash* msg_cache;
@@ -706,9 +712,10 @@ struct module_env {
     /* --- services --- */
     struct outbound_entry* (*send_query)(struct query_info* qinfo,
         uint16_t flags, int dnssec, int want_dnssec, int nocaps,
+        int check_ratelimit,
         struct sockaddr_storage* addr, socklen_t addrlen,
-        uint8_t* zone, size_t zonelen, int ssl_upstream, char* tls_auth_name,
-        struct module_qstate* q);
+        uint8_t* zone, size_t zonelen, int tcp_upstream, int ssl_upstream,
+        char* tls_auth_name, struct module_qstate* q, int* was_ratelimited);
     void (*detach_subs)(struct module_qstate* qstate);
     int (*attach_sub)(struct module_qstate* qstate,
         struct query_info* qinfo, uint16_t qflags, int prime,
@@ -738,6 +745,19 @@ struct module_env {
     struct edns_known_option* edns_known_options;
     size_t edns_known_options_num;
 };
+
+%inline %{
+    PyObject* _module_env_now_get(struct module_env* env) {
+        double ts = env->now_tv->tv_sec + env->now_tv->tv_usec / 1e6;
+        return PyFloat_FromDouble(ts);
+    }
+%}
+%extend module_env {
+    %pythoncode %{
+        def _now_get(self): return _module_env_now_get(self)
+        now = property(_now_get)
+    %}
+}
 
 /* ************************************************************************************ *
    Structure module_qstate
@@ -992,8 +1012,6 @@ struct config_file {
    struct config_strlist* trust_anchor_file_list;
    struct config_strlist* trust_anchor_list;
    struct config_strlist* trusted_keys_file_list;
-   char* dlv_anchor_file;
-   struct config_strlist* dlv_anchor_list;
    int max_ttl;
    int32_t val_date_override;
    int bogus_ttl;
@@ -1327,7 +1345,7 @@ int set_return_msg(struct module_qstate* qstate,
 %pythoncode %{
     class DNSMessage:
         def __init__(self, rr_name, rr_type, rr_class = RR_CLASS_IN, query_flags = 0, default_ttl = 0):
-            """Query flags is a combination of PKT_xx contants"""
+            """Query flags is a combination of PKT_xx constants"""
             self.rr_name = rr_name
             self.rr_type = rr_type
             self.rr_class = rr_class
@@ -1357,9 +1375,10 @@ int set_return_msg(struct module_qstate* qstate,
 /* Functions which we will need to lookup delegations */
 struct delegpt* dns_cache_find_delegation(struct module_env* env,
         uint8_t* qname, size_t qnamelen, uint16_t qtype, uint16_t qclass,
-        struct regional* region, struct dns_msg** msg, uint32_t timenow);
+        struct regional* region, struct dns_msg** msg, uint32_t timenow,
+        int noexpiredabove, uint8_t* expiretop, size_t expiretoplen);
 int iter_dp_is_useless(struct query_info* qinfo, uint16_t qflags,
-        struct delegpt* dp);
+        struct delegpt* dp, int supports_ipv4, int supports_ipv6);
 struct iter_hints_stub* hints_lookup_stub(struct iter_hints* hints,
         uint8_t* qname, uint16_t qclass, struct delegpt* dp);
 
@@ -1386,10 +1405,11 @@ struct delegpt* find_delegation(struct module_qstate* qstate, char *nm, size_t n
     qinfo.qclass = LDNS_RR_CLASS_IN;
 
     while(1) {
-        dp = dns_cache_find_delegation(qstate->env, (uint8_t*)nm, nmlen, qinfo.qtype, qinfo.qclass, region, &msg, timenow);
+        dp = dns_cache_find_delegation(qstate->env, (uint8_t*)nm, nmlen, qinfo.qtype, qinfo.qclass, region, &msg, timenow, 0, NULL, 0);
         if(!dp)
             return NULL;
-        if(iter_dp_is_useless(&qinfo, BIT_RD, dp)) {
+        if(iter_dp_is_useless(&qinfo, BIT_RD, dp,
+                qstate->env->cfg->do_ip4, qstate->env->cfg->do_ip6)) {
             if (dname_is_root((uint8_t*)nm))
                 return NULL;
             nm = (char*)dp->name;
@@ -1415,6 +1435,19 @@ struct delegpt* find_delegation(struct module_qstate* qstate, char *nm, size_t n
 /******************************
  * Various debugging functions *
  ******************************/
+
+/* rename the variadic functions because python does the formatting already*/
+%rename (unbound_log_info) log_info;
+%rename (unbound_log_err) log_err;
+%rename (unbound_log_warn) log_warn;
+%rename (unbound_verbose) verbose;
+/* provide functions that take one string as argument, so python can cook
+the string */
+%rename (log_info) pymod_log_info;
+%rename (log_warn) pymod_log_warn;
+%rename (log_err) pymod_log_err;
+%rename (verbose) pymod_verbose;
+
 void verbose(enum verbosity_value level, const char* format, ...);
 void log_info(const char* format, ...);
 void log_err(const char* format, ...);
@@ -1423,6 +1456,19 @@ void log_hex(const char* msg, void* data, size_t length);
 void log_dns_msg(const char* str, struct query_info* qinfo, struct reply_info* rep);
 void log_query_info(enum verbosity_value v, const char* str, struct query_info* qinf);
 void regional_log_stats(struct regional *r);
+
+/* the one argument string log functions */
+void pymod_log_info(const char* str);
+void pymod_log_err(const char* str);
+void pymod_log_warn(const char* str);
+void pymod_verbose(enum verbosity_value level, const char* str);
+%{
+void pymod_log_info(const char* str) { log_info("%s", str); }
+void pymod_log_err(const char* str) { log_err("%s", str); }
+void pymod_log_warn(const char* str) { log_warn("%s", str); }
+void pymod_verbose(enum verbosity_value level, const char* str) {
+        verbose(level, "%s", str); }
+%}
 
 /***************************************************************************
  * Free allocated memory from marked sources returning corresponding types *
@@ -1501,13 +1547,14 @@ int edns_opt_list_append(struct edns_option** list, uint16_t code, size_t len,
     int python_inplace_cb_reply_generic(struct query_info* qinfo,
         struct module_qstate* qstate, struct reply_info* rep, int rcode,
         struct edns_data* edns, struct edns_option** opt_list_out,
-        struct comm_reply* repinfo, struct regional* region, int id,
-        void* python_callback)
+        struct comm_reply* repinfo, struct regional* region,
+        struct timeval* start_time, int id, void* python_callback)
     {
         PyObject *func, *py_edns, *py_qstate, *py_opt_list_out, *py_qinfo;
         PyObject *py_rep, *py_repinfo, *py_region;
-        PyObject *py_args, *py_kwargs, *result;
+        PyObject *py_args = NULL, *py_kwargs = NULL, *result = NULL;
         int res = 0;
+        double py_start_time = ((double)start_time->tv_sec) + ((double)start_time->tv_usec) / 1.0e6;
 
         PyGILState_STATE gstate = PyGILState_Ensure();
         func = (PyObject *) python_callback;
@@ -1520,10 +1567,20 @@ int edns_opt_list_append(struct edns_option** list, uint16_t code, size_t len,
         py_rep = SWIG_NewPointerObj((void*) rep, SWIGTYPE_p_reply_info, 0);
         py_repinfo = SWIG_NewPointerObj((void*) repinfo, SWIGTYPE_p_comm_reply, 0);
         py_region = SWIG_NewPointerObj((void*) region, SWIGTYPE_p_regional, 0);
-        py_args = Py_BuildValue("(OOOiOOO)", py_qinfo, py_qstate, py_rep,
-            rcode, py_edns, py_opt_list_out, py_region);
-        py_kwargs = Py_BuildValue("{s:O}", "repinfo", py_repinfo);
-        result = PyObject_Call(func, py_args, py_kwargs);
+        if(py_qinfo && py_qstate && py_rep && py_edns && py_opt_list_out
+                && py_region && py_repinfo) {
+                py_args = Py_BuildValue("(OOOiOOO)", py_qinfo, py_qstate, py_rep,
+                        rcode, py_edns, py_opt_list_out, py_region);
+                py_kwargs = Py_BuildValue("{s:O,s:d}", "repinfo", py_repinfo, "start_time",
+                          py_start_time);
+                if(py_args && py_kwargs) {
+                        result = PyObject_Call(func, py_args, py_kwargs);
+                } else {
+                        log_err("pythonmod: malloc failure in python_inplace_cb_reply_generic");
+                }
+        } else {
+                log_err("pythonmod: malloc failure in python_inplace_cb_reply_generic");
+        }
         Py_XDECREF(py_edns);
         Py_XDECREF(py_qstate);
         Py_XDECREF(py_opt_list_out);
@@ -1582,6 +1639,7 @@ int edns_opt_list_append(struct edns_option** list, uint16_t code, size_t len,
     {
         int res = 0;
         PyObject *func = python_callback;
+        PyObject *py_args = NULL, *py_kwargs = NULL, *result = NULL;
 
         PyGILState_STATE gstate = PyGILState_Ensure();
 
@@ -1590,12 +1648,19 @@ int edns_opt_list_append(struct edns_option** list, uint16_t code, size_t len,
         PyObject *py_addr = SWIG_NewPointerObj((void *) addr, SWIGTYPE_p_sockaddr_storage, 0);
         PyObject *py_zone = PyBytes_FromStringAndSize((const char *)zone, zonelen);
         PyObject *py_region = SWIG_NewPointerObj((void*) region, SWIGTYPE_p_regional, 0);
-
-        PyObject *py_args = Py_BuildValue("(OiOOOO)", py_qinfo, flags, py_qstate, py_addr, py_zone, py_region);
-        PyObject *py_kwargs = Py_BuildValue("{}");
-        PyObject *result = PyObject_Call(func, py_args, py_kwargs);
-        if (result) {
-            res = PyInt_AsLong(result);
+        if(py_qinfo && py_qstate && py_addr && py_zone && py_region) {
+                py_args = Py_BuildValue("(OiOOOO)", py_qinfo, flags, py_qstate, py_addr, py_zone, py_region);
+                py_kwargs = Py_BuildValue("{}");
+                if(py_args && py_kwargs) {
+                        result = PyObject_Call(func, py_args, py_kwargs);
+                        if (result) {
+                            res = PyInt_AsLong(result);
+                        }
+                } else {
+                        log_err("pythonmod: malloc failure in python_inplace_cb_query_generic");
+                }
+        } else {
+                log_err("pythonmod: malloc failure in python_inplace_cb_query_generic");
         }
 
         Py_XDECREF(py_qinfo);

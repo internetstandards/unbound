@@ -390,6 +390,15 @@ prep_data(struct module_qstate* qstate, struct sldns_buffer* buf)
 
 	if(!qstate->return_msg || !qstate->return_msg->rep)
 		return 0;
+	/* do not store failures like SERVFAIL in the cachedb, this avoids
+	 * overwriting expired, valid, content with broken content. */
+	if(FLAGS_GET_RCODE(qstate->return_msg->rep->flags) !=
+		LDNS_RCODE_NOERROR &&
+	   FLAGS_GET_RCODE(qstate->return_msg->rep->flags) !=
+		LDNS_RCODE_NXDOMAIN &&
+	   FLAGS_GET_RCODE(qstate->return_msg->rep->flags) !=
+		LDNS_RCODE_YXDOMAIN)
+		return 0;
 	/* We don't store the reply if its TTL is 0 unless serve-expired is
 	 * enabled.  Such a reply won't be reusable and simply be a waste for
 	 * the backend.  It's also compatible with the default behavior of
@@ -465,6 +474,7 @@ packed_rrset_ttl_subtract(struct packed_rrset_data* data, time_t subtract)
 			data->rr_ttl[i] -= subtract;
 		else	data->rr_ttl[i] = 0;
 	}
+	data->ttl_add = (subtract < data->ttl_add) ? (data->ttl_add - subtract) : 0;
 }
 
 /* Adjust the TTL of a DNS message and its RRs by 'adjust'.  If 'adjust' is
@@ -518,7 +528,7 @@ parse_data(struct module_qstate* qstate, struct sldns_buffer* buf)
 		sldns_buffer_set_limit(buf, lim);
 		return 0;
 	}
-	if(parse_extract_edns(prs, &edns, qstate->env->scratch) !=
+	if(parse_extract_edns_from_response_msg(prs, &edns, qstate->env->scratch) !=
 		LDNS_RCODE_NOERROR) {
 		sldns_buffer_set_limit(buf, lim);
 		return 0;
@@ -541,10 +551,16 @@ parse_data(struct module_qstate* qstate, struct sldns_buffer* buf)
 		verbose(VERB_ALGO, "cachedb msg expired");
 		/* If serve-expired is enabled, we still use an expired message
 		 * setting the TTL to 0. */
-		if(qstate->env->cfg->serve_expired)
-			adjust = -1;
-		else
+		if(!qstate->env->cfg->serve_expired ||
+			(FLAGS_GET_RCODE(qstate->return_msg->rep->flags)
+			!= LDNS_RCODE_NOERROR &&
+			FLAGS_GET_RCODE(qstate->return_msg->rep->flags)
+			!= LDNS_RCODE_NXDOMAIN &&
+			FLAGS_GET_RCODE(qstate->return_msg->rep->flags)
+			!= LDNS_RCODE_YXDOMAIN))
 			return 0; /* message expired */
+		else
+			adjust = -1;
 	}
 	verbose(VERB_ALGO, "cachedb msg adjusted down by %d", (int)adjust);
 	adjust_msg_ttl(qstate->return_msg, adjust);
@@ -616,12 +632,18 @@ cachedb_extcache_store(struct module_qstate* qstate, struct cachedb_env* ie)
 static int
 cachedb_intcache_lookup(struct module_qstate* qstate)
 {
+	uint8_t* dpname=NULL;
+	size_t dpnamelen=0;
 	struct dns_msg* msg;
+	if(iter_stub_fwd_no_cache(qstate, &qstate->qinfo,
+		&dpname, &dpnamelen))
+		return 0; /* no cache for these queries */
 	msg = dns_cache_lookup(qstate->env, qstate->qinfo.qname,
 		qstate->qinfo.qname_len, qstate->qinfo.qtype,
 		qstate->qinfo.qclass, qstate->query_flags,
 		qstate->region, qstate->env->scratch,
-		1 /* no partial messages with only a CNAME */
+		1, /* no partial messages with only a CNAME */
+		dpname, dpnamelen
 		);
 	if(!msg && qstate->env->neg_cache &&
 		iter_qname_indicates_dnssec(qstate->env, &qstate->qinfo)) {
@@ -655,7 +677,7 @@ cachedb_intcache_store(struct module_qstate* qstate)
 		return;
 	(void)dns_cache_store(qstate->env, &qstate->qinfo,
 		qstate->return_msg->rep, 0, qstate->prefetch_leeway, 0,
-		qstate->region, store_flags);
+		qstate->region, store_flags, qstate->qstarttime);
 }
 
 /**

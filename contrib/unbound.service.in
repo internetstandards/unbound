@@ -44,7 +44,6 @@ Description=Validating, recursive, and caching DNS resolver
 Documentation=man:unbound(8)
 After=network.target
 Before=network-online.target nss-lookup.target
-Wants=nss-lookup.target
 
 [Install]
 WantedBy=multi-user.target
@@ -60,13 +59,18 @@ NoNewPrivileges=true
 PrivateDevices=true
 PrivateTmp=true
 ProtectHome=true
+ProtectClock=true
 ProtectControlGroups=true
+ProtectKernelLogs=true
 ProtectKernelModules=true
+# This breaks using socket options like 'so-rcvbuf'. Explicitly disable for visibility.
+ProtectKernelTunables=false
+ProtectProc=invisible
 ProtectSystem=strict
 RuntimeDirectory=unbound
 ConfigurationDirectory=unbound
 StateDirectory=unbound
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
 RestrictRealtime=true
 SystemCallArchitectures=native
 SystemCallFilter=~@clock @cpu-emulation @debug @keyring @module mount @obsolete @resources

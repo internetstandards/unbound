@@ -64,6 +64,11 @@
 #include "respip/respip.h"
 #include "services/listen_dnsport.h"
 
+#ifdef CLIENT_SUBNET
+#include "edns-subnet/subnetmod.h"
+#include "edns-subnet/edns-subnet.h"
+#endif
+
 /** subtract timers and the values do not overflow or become negative */
 static void
 timeval_subtract(struct timeval* d, const struct timeval* end, const struct timeval* start)
@@ -99,7 +104,7 @@ timeval_divide(struct timeval* avg, const struct timeval* sum, size_t d)
 {
 #ifndef S_SPLINT_S
 	size_t leftover;
-	if(d == 0) {
+	if(d <= 0) {
 		avg->tv_sec = 0;
 		avg->tv_usec = 0;
 		return;
@@ -108,7 +113,13 @@ timeval_divide(struct timeval* avg, const struct timeval* sum, size_t d)
 	avg->tv_usec = sum->tv_usec / d;
 	/* handle fraction from seconds divide */
 	leftover = sum->tv_sec - avg->tv_sec*d;
-	avg->tv_usec += (leftover*1000000)/d;
+	if(leftover <= 0)
+		leftover = 0;
+	avg->tv_usec += (((long long)leftover)*((long long)1000000))/d;
+	if(avg->tv_sec < 0)
+		avg->tv_sec = 0;
+	if(avg->tv_usec < 0)
+		avg->tv_usec = 0;
 #endif
 }
 
@@ -433,7 +444,7 @@ mesh_serve_expired_init(struct mesh_state* mstate, int timeout)
 	mstate->s.serve_expired_data->get_cached_answer =
 		mstate->s.serve_expired_data->get_cached_answer?
 		mstate->s.serve_expired_data->get_cached_answer:
-		mesh_serve_expired_lookup;
+		&mesh_serve_expired_lookup;
 
 	/* In case this timer already popped, start it again */
 	if(!mstate->s.serve_expired_data->timer) {
@@ -452,10 +463,11 @@ mesh_serve_expired_init(struct mesh_state* mstate, int timeout)
 
 void mesh_new_client(struct mesh_area* mesh, struct query_info* qinfo,
 	struct respip_client_info* cinfo, uint16_t qflags,
-	struct edns_data* edns, struct comm_reply* rep, uint16_t qid)
+	struct edns_data* edns, struct comm_reply* rep, uint16_t qid,
+	int rpz_passthru)
 {
 	struct mesh_state* s = NULL;
-	int unique = unique_mesh_state(edns->opt_list, mesh->env);
+	int unique = unique_mesh_state(edns->opt_list_in, mesh->env);
 	int was_detached = 0;
 	int was_noreply = 0;
 	int added = 0;
@@ -498,8 +510,8 @@ void mesh_new_client(struct mesh_area* mesh, struct query_info* qinfo,
 		if(!s) {
 			log_err("mesh_state_create: out of memory; SERVFAIL");
 			if(!inplace_cb_reply_servfail_call(mesh->env, qinfo, NULL, NULL,
-				LDNS_RCODE_SERVFAIL, edns, rep, mesh->env->scratch))
-					edns->opt_list = NULL;
+				LDNS_RCODE_SERVFAIL, edns, rep, mesh->env->scratch, mesh->env->now_tv))
+					edns->opt_list_inplace_cb_out = NULL;
 			error_encode(r_buffer, LDNS_RCODE_SERVFAIL,
 				qinfo, qid, qflags, edns);
 			comm_point_send_reply(rep);
@@ -507,15 +519,16 @@ void mesh_new_client(struct mesh_area* mesh, struct query_info* qinfo,
 		}
 		if(unique)
 			mesh_state_make_unique(s);
+		s->s.rpz_passthru = rpz_passthru;
 		/* copy the edns options we got from the front */
-		if(edns->opt_list) {
-			s->s.edns_opts_front_in = edns_opt_copy_region(edns->opt_list,
+		if(edns->opt_list_in) {
+			s->s.edns_opts_front_in = edns_opt_copy_region(edns->opt_list_in,
 				s->s.region);
 			if(!s->s.edns_opts_front_in) {
 				log_err("mesh_state_create: out of memory; SERVFAIL");
 				if(!inplace_cb_reply_servfail_call(mesh->env, qinfo, NULL,
-					NULL, LDNS_RCODE_SERVFAIL, edns, rep, mesh->env->scratch))
-						edns->opt_list = NULL;
+					NULL, LDNS_RCODE_SERVFAIL, edns, rep, mesh->env->scratch, mesh->env->now_tv))
+						edns->opt_list_inplace_cb_out = NULL;
 				error_encode(r_buffer, LDNS_RCODE_SERVFAIL,
 					qinfo, qid, qflags, edns);
 				comm_point_send_reply(rep);
@@ -551,6 +564,9 @@ void mesh_new_client(struct mesh_area* mesh, struct query_info* qinfo,
 			goto servfail_mem;
 		}
 	}
+	if(rep->c->use_h2) {
+		http2_stream_add_meshstate(rep->c->h2_stream, mesh, s);
+	}
 	/* add serve expired timer if required and not already there */
 	if(timeout && !mesh_serve_expired_init(s, timeout)) {
 		log_err("mesh_new_client: out of memory initializing serve expired");
@@ -584,8 +600,8 @@ void mesh_new_client(struct mesh_area* mesh, struct query_info* qinfo,
 
 servfail_mem:
 	if(!inplace_cb_reply_servfail_call(mesh->env, qinfo, &s->s,
-		NULL, LDNS_RCODE_SERVFAIL, edns, rep, mesh->env->scratch))
-			edns->opt_list = NULL;
+		NULL, LDNS_RCODE_SERVFAIL, edns, rep, mesh->env->scratch, mesh->env->now_tv))
+			edns->opt_list_inplace_cb_out = NULL;
 	error_encode(r_buffer, LDNS_RCODE_SERVFAIL,
 		qinfo, qid, qflags, edns);
 	comm_point_send_reply(rep);
@@ -597,10 +613,10 @@ servfail_mem:
 int 
 mesh_new_callback(struct mesh_area* mesh, struct query_info* qinfo,
 	uint16_t qflags, struct edns_data* edns, sldns_buffer* buf, 
-	uint16_t qid, mesh_cb_func_type cb, void* cb_arg)
+	uint16_t qid, mesh_cb_func_type cb, void* cb_arg, int rpz_passthru)
 {
 	struct mesh_state* s = NULL;
-	int unique = unique_mesh_state(edns->opt_list, mesh->env);
+	int unique = unique_mesh_state(edns->opt_list_in, mesh->env);
 	int timeout = mesh->env->cfg->serve_expired?
 		mesh->env->cfg->serve_expired_client_timeout:0;
 	int was_detached = 0;
@@ -623,8 +639,9 @@ mesh_new_callback(struct mesh_area* mesh, struct query_info* qinfo,
 		}
 		if(unique)
 			mesh_state_make_unique(s);
-		if(edns->opt_list) {
-			s->s.edns_opts_front_in = edns_opt_copy_region(edns->opt_list,
+		s->s.rpz_passthru = rpz_passthru;
+		if(edns->opt_list_in) {
+			s->s.edns_opts_front_in = edns_opt_copy_region(edns->opt_list_in,
 				s->s.region);
 			if(!s->s.edns_opts_front_in) {
 				return 0;
@@ -677,7 +694,8 @@ mesh_new_callback(struct mesh_area* mesh, struct query_info* qinfo,
  * 0 (false), in which case the new state is only made runnable so it
  * will not be run recursively on top of the current state. */
 static void mesh_schedule_prefetch(struct mesh_area* mesh,
-	struct query_info* qinfo, uint16_t qflags, time_t leeway, int run)
+	struct query_info* qinfo, uint16_t qflags, time_t leeway, int run,
+	int rpz_passthru)
 {
 	struct mesh_state* s = mesh_area_find(mesh, NULL, qinfo,
 		qflags&(BIT_RD|BIT_CD), 0, 0);
@@ -723,15 +741,16 @@ static void mesh_schedule_prefetch(struct mesh_area* mesh,
 		/* move to either the forever or the jostle_list */
 		if(mesh->num_forever_states < mesh->max_forever_states) {
 			mesh->num_forever_states ++;
-			mesh_list_insert(s, &mesh->forever_first, 
+			mesh_list_insert(s, &mesh->forever_first,
 				&mesh->forever_last);
 			s->list_select = mesh_forever_list;
 		} else {
-			mesh_list_insert(s, &mesh->jostle_first, 
+			mesh_list_insert(s, &mesh->jostle_first,
 				&mesh->jostle_last);
 			s->list_select = mesh_jostle_list;
 		}
 	}
+	s->s.rpz_passthru = rpz_passthru;
 
 	if(!run) {
 #ifdef UNBOUND_DEBUG
@@ -747,10 +766,115 @@ static void mesh_schedule_prefetch(struct mesh_area* mesh,
 	mesh_run(mesh, s, module_event_new, NULL);
 }
 
-void mesh_new_prefetch(struct mesh_area* mesh, struct query_info* qinfo,
-        uint16_t qflags, time_t leeway)
+#ifdef CLIENT_SUBNET
+/* Same logic as mesh_schedule_prefetch but tailored to the subnet module logic
+ * like passing along the comm_reply info. This will be faked into an EDNS
+ * option for processing by the subnet module if the client has not already
+ * attached its own ECS data. */
+static void mesh_schedule_prefetch_subnet(struct mesh_area* mesh,
+	struct query_info* qinfo, uint16_t qflags, time_t leeway, int run,
+	int rpz_passthru, struct comm_reply* rep, struct edns_option* edns_list)
 {
-	mesh_schedule_prefetch(mesh, qinfo, qflags, leeway, 1);
+	struct mesh_state* s = NULL;
+	struct edns_option* opt = NULL;
+#ifdef UNBOUND_DEBUG
+	struct rbnode_type* n;
+#endif
+	if(!mesh_make_new_space(mesh, NULL)) {
+		verbose(VERB_ALGO, "Too many queries. dropped prefetch.");
+		mesh->stats_dropped ++;
+		return;
+	}
+
+	s = mesh_state_create(mesh->env, qinfo, NULL,
+		qflags&(BIT_RD|BIT_CD), 0, 0);
+	if(!s) {
+		log_err("prefetch_subnet mesh_state_create: out of memory");
+		return;
+	}
+	mesh_state_make_unique(s);
+
+	opt = edns_opt_list_find(edns_list, mesh->env->cfg->client_subnet_opcode);
+	if(opt) {
+		/* Use the client's ECS data */
+		if(!edns_opt_list_append(&s->s.edns_opts_front_in, opt->opt_code,
+			opt->opt_len, opt->opt_data, s->s.region)) {
+			log_err("prefetch_subnet edns_opt_list_append: out of memory");
+			return;
+		}
+	} else {
+		/* Fake the ECS data from the client's IP */
+		struct ecs_data ecs;
+		memset(&ecs, 0, sizeof(ecs));
+		subnet_option_from_ss(&rep->client_addr, &ecs, mesh->env->cfg);
+		if(ecs.subnet_validdata == 0) {
+			log_err("prefetch_subnet subnet_option_from_ss: invalid data");
+			return;
+		}
+		subnet_ecs_opt_list_append(&ecs, &s->s.edns_opts_front_in,
+			&s->s, s->s.region);
+		if(!s->s.edns_opts_front_in) {
+			log_err("prefetch_subnet subnet_ecs_opt_list_append: out of memory");
+			return;
+		}
+	}
+#ifdef UNBOUND_DEBUG
+	n =
+#else
+	(void)
+#endif
+	rbtree_insert(&mesh->all, &s->node);
+	log_assert(n != NULL);
+	/* set detached (it is now) */
+	mesh->num_detached_states++;
+	/* make it ignore the cache */
+	sock_list_insert(&s->s.blacklist, NULL, 0, s->s.region);
+	s->s.prefetch_leeway = leeway;
+
+	if(s->list_select == mesh_no_list) {
+		/* move to either the forever or the jostle_list */
+		if(mesh->num_forever_states < mesh->max_forever_states) {
+			mesh->num_forever_states ++;
+			mesh_list_insert(s, &mesh->forever_first,
+				&mesh->forever_last);
+			s->list_select = mesh_forever_list;
+		} else {
+			mesh_list_insert(s, &mesh->jostle_first,
+				&mesh->jostle_last);
+			s->list_select = mesh_jostle_list;
+		}
+	}
+	s->s.rpz_passthru = rpz_passthru;
+
+	if(!run) {
+#ifdef UNBOUND_DEBUG
+		n =
+#else
+		(void)
+#endif
+		rbtree_insert(&mesh->run, &s->run_node);
+		log_assert(n != NULL);
+		return;
+	}
+
+	mesh_run(mesh, s, module_event_new, NULL);
+}
+#endif /* CLIENT_SUBNET */
+
+void mesh_new_prefetch(struct mesh_area* mesh, struct query_info* qinfo,
+	uint16_t qflags, time_t leeway, int rpz_passthru,
+	struct comm_reply* rep, struct edns_option* opt_list)
+{
+	(void)opt_list;
+	(void)rep;
+#ifdef CLIENT_SUBNET
+	if(rep)
+		mesh_schedule_prefetch_subnet(mesh, qinfo, qflags, leeway, 1,
+			rpz_passthru, rep, opt_list);
+	else
+#endif
+		mesh_schedule_prefetch(mesh, qinfo, qflags, leeway, 1,
+			rpz_passthru);
 }
 
 void mesh_report_reply(struct mesh_area* mesh, struct outbound_entry* e,
@@ -830,6 +954,7 @@ mesh_state_create(struct module_env* env, struct query_info* qinfo,
 	mstate->s.no_cache_store = 0;
 	mstate->s.need_refetch = 0;
 	mstate->s.was_ratelimited = 0;
+	mstate->s.qstarttime = *env->now;
 
 	/* init modules */
 	for(i=0; i<env->mesh->mods.num; i++) {
@@ -1109,10 +1234,12 @@ int mesh_state_attachment(struct mesh_state* super, struct mesh_state* sub)
  * @param rcode: if not 0, error code.
  * @param rep: reply to send (or NULL if rcode is set).
  * @param r: callback entry
+ * @param start_time: the time to pass to callback functions, it is 0 or
+ * 	a value from one of the packets if the mesh state had packets.
  */
 static void
 mesh_do_callback(struct mesh_state* m, int rcode, struct reply_info* rep,
-	struct mesh_cb* r)
+	struct mesh_cb* r, struct timeval* start_time)
 {
 	int secure;
 	char* reason = NULL;
@@ -1136,12 +1263,12 @@ mesh_do_callback(struct mesh_state* m, int rcode, struct reply_info* rep,
 	if(rcode) {
 		if(rcode == LDNS_RCODE_SERVFAIL) {
 			if(!inplace_cb_reply_servfail_call(m->s.env, &m->s.qinfo, &m->s,
-				rep, rcode, &r->edns, NULL, m->s.region))
-					r->edns.opt_list = NULL;
+				rep, rcode, &r->edns, NULL, m->s.region, start_time))
+					r->edns.opt_list_inplace_cb_out = NULL;
 		} else {
 			if(!inplace_cb_reply_call(m->s.env, &m->s.qinfo, &m->s, rep, rcode,
-				&r->edns, NULL, m->s.region))
-					r->edns.opt_list = NULL;
+				&r->edns, NULL, m->s.region, start_time))
+					r->edns.opt_list_inplace_cb_out = NULL;
 		}
 		fptr_ok(fptr_whitelist_mesh_cb(r->cb));
 		(*r->cb)(r->cb_arg, rcode, r->buf, sec_status_unchecked, NULL,
@@ -1155,7 +1282,7 @@ mesh_do_callback(struct mesh_state* m, int rcode, struct reply_info* rep,
 		r->edns.bits &= EDNS_DO;
 
 		if(!inplace_cb_reply_call(m->s.env, &m->s.qinfo, &m->s, rep,
-			LDNS_RCODE_NOERROR, &r->edns, NULL, m->s.region) ||
+			LDNS_RCODE_NOERROR, &r->edns, NULL, m->s.region, start_time) ||
 			!reply_info_answer_encode(&m->s.qinfo, rep, r->qid, 
 			r->qflags, r->buf, 0, 1, 
 			m->s.env->scratch, udp_size, &r->edns, 
@@ -1173,6 +1300,22 @@ mesh_do_callback(struct mesh_state* m, int rcode, struct reply_info* rep,
 	free(reason);
 	log_assert(m->s.env->mesh->num_reply_addrs > 0);
 	m->s.env->mesh->num_reply_addrs--;
+}
+
+static inline int
+mesh_is_rpz_respip_tcponly_action(struct mesh_state const* m)
+{
+	struct respip_action_info const* respip_info = m->s.respip_action_info;
+	return respip_info == NULL
+			? 0
+			: (respip_info->rpz_used
+			&& !respip_info->rpz_disabled
+			&& respip_info->action == respip_truncate);
+}
+
+static inline int
+mesh_is_udp(struct mesh_reply const* r) {
+	return r->query_reply.c->type == comm_udp;
 }
 
 /**
@@ -1193,16 +1336,24 @@ mesh_send_reply(struct mesh_state* m, int rcode, struct reply_info* rep,
 	struct timeval end_time;
 	struct timeval duration;
 	int secure;
-	/* Copy the client's EDNS for later restore, to make sure the edns
-	 * compare is with the correct edns options. */
-	struct edns_data edns_bak = r->edns;
+	/* briefly set the replylist to null in case the
+	 * meshsendreply calls tcpreqinfo sendreply that
+	 * comm_point_drops because of size, and then the
+	 * null stops the mesh state remove and thus
+	 * reply_list modification and accounting */
+	struct mesh_reply* rlist = m->reply_list;
+
+	/* rpz: apply actions */
+	rcode = mesh_is_udp(r) && mesh_is_rpz_respip_tcponly_action(m)
+			? (rcode|BIT_TC) : rcode;
+
 	/* examine security status */
 	if(m->s.env->need_to_validate && (!(r->qflags&BIT_CD) ||
 		m->s.env->cfg->ignore_cd) && rep && 
 		(rep->security <= sec_status_bogus ||
 		rep->security == sec_status_secure_sentinel_fail)) {
 		rcode = LDNS_RCODE_SERVFAIL;
-		if(m->s.env->cfg->stat_extended) 
+		if(m->s.env->cfg->stat_extended)
 			m->s.env->mesh->ans_bogus++;
 	}
 	if(rep && rep->security == sec_status_secure)
@@ -1210,41 +1361,89 @@ mesh_send_reply(struct mesh_state* m, int rcode, struct reply_info* rep,
 	else	secure = 0;
 	if(!rep && rcode == LDNS_RCODE_NOERROR)
 		rcode = LDNS_RCODE_SERVFAIL;
+	if(r->query_reply.c->use_h2) {
+		r->query_reply.c->h2_stream = r->h2_stream;
+		/* Mesh reply won't exist for long anymore. Make it impossible
+		 * for HTTP/2 stream to refer to mesh state, in case
+		 * connection gets cleanup before HTTP/2 stream close. */
+		r->h2_stream->mesh_state = NULL;
+	}
 	/* send the reply */
-	/* We don't reuse the encoded answer if either the previous or current
-	 * response has a local alias.  We could compare the alias records
-	 * and still reuse the previous answer if they are the same, but that
-	 * would be complicated and error prone for the relatively minor case.
-	 * So we err on the side of safety. */
-	if(prev && prev_buffer && prev->qflags == r->qflags && 
+	/* We don't reuse the encoded answer if:
+	 * - either the previous or current response has a local alias.  We could
+	 *   compare the alias records and still reuse the previous answer if they
+	 *   are the same, but that would be complicated and error prone for the
+	 *   relatively minor case. So we err on the side of safety.
+	 * - there are registered callback functions for the given rcode, as these
+	 *   need to be called for each reply. */
+	if(((rcode != LDNS_RCODE_SERVFAIL &&
+			!m->s.env->inplace_cb_lists[inplace_cb_reply]) ||
+		(rcode == LDNS_RCODE_SERVFAIL &&
+			!m->s.env->inplace_cb_lists[inplace_cb_reply_servfail])) &&
+		prev && prev_buffer && prev->qflags == r->qflags &&
 		!prev->local_alias && !r->local_alias &&
-		prev->edns.edns_present == r->edns.edns_present && 
-		prev->edns.bits == r->edns.bits && 
+		prev->edns.edns_present == r->edns.edns_present &&
+		prev->edns.bits == r->edns.bits &&
 		prev->edns.udp_size == r->edns.udp_size &&
-		edns_opt_list_compare(prev->edns.opt_list, r->edns.opt_list)
-		== 0) {
+		edns_opt_list_compare(prev->edns.opt_list_out, r->edns.opt_list_out) == 0 &&
+		edns_opt_list_compare(prev->edns.opt_list_inplace_cb_out, r->edns.opt_list_inplace_cb_out) == 0
+		) {
 		/* if the previous reply is identical to this one, fix ID */
 		if(prev_buffer != r_buffer)
 			sldns_buffer_copy(r_buffer, prev_buffer);
 		sldns_buffer_write_at(r_buffer, 0, &r->qid, sizeof(uint16_t));
 		sldns_buffer_write_at(r_buffer, 12, r->qname,
 			m->s.qinfo.qname_len);
+		m->reply_list = NULL;
 		comm_point_send_reply(&r->query_reply);
+		m->reply_list = rlist;
 	} else if(rcode) {
 		m->s.qinfo.qname = r->qname;
 		m->s.qinfo.local_alias = r->local_alias;
 		if(rcode == LDNS_RCODE_SERVFAIL) {
 			if(!inplace_cb_reply_servfail_call(m->s.env, &m->s.qinfo, &m->s,
-				rep, rcode, &r->edns, NULL, m->s.region))
-					r->edns.opt_list = NULL;
+				rep, rcode, &r->edns, &r->query_reply, m->s.region, &r->start_time))
+					r->edns.opt_list_inplace_cb_out = NULL;
 		} else { 
 			if(!inplace_cb_reply_call(m->s.env, &m->s.qinfo, &m->s, rep, rcode,
-				&r->edns, NULL, m->s.region))
-					r->edns.opt_list = NULL;
+				&r->edns, &r->query_reply, m->s.region, &r->start_time))
+					r->edns.opt_list_inplace_cb_out = NULL;
+		}
+		/* Send along EDE BOGUS EDNS0 option when answer is bogus */
+		if(m->s.env->cfg->ede && rcode == LDNS_RCODE_SERVFAIL &&
+			m->s.env->need_to_validate && (!(r->qflags&BIT_CD) ||
+			m->s.env->cfg->ignore_cd) && rep &&
+			(rep->security <= sec_status_bogus ||
+			rep->security == sec_status_secure_sentinel_fail)) {
+			char *reason = m->s.env->cfg->val_log_level >= 2
+				? errinf_to_str_bogus(&m->s) : NULL;
+
+			/* During validation the EDE code can be received via two
+			 * code paths. One code path fills the reply_info EDE, and
+			 * the other fills it in the errinf_strlist. These paths
+			 * intersect at some points, but where is opaque due to
+			 * the complexity of the validator. At the time of writing
+			 * we make the choice to prefer the EDE from errinf_strlist
+			 * but a compelling reason to do otherwise is just as valid
+			 */
+			sldns_ede_code reason_bogus = errinf_to_reason_bogus(&m->s);
+			if ((reason_bogus == LDNS_EDE_DNSSEC_BOGUS &&
+				rep->reason_bogus != LDNS_EDE_NONE) ||
+				reason_bogus == LDNS_EDE_NONE) {
+					reason_bogus = rep->reason_bogus;
+			}
+
+			if(reason_bogus != LDNS_EDE_NONE) {
+				edns_opt_list_append_ede(&r->edns.opt_list_out,
+					m->s.region, reason_bogus, reason);
+			}
+			free(reason);
 		}
 		error_encode(r_buffer, rcode, &m->s.qinfo, r->qid,
 			r->qflags, &r->edns);
+		m->reply_list = NULL;
 		comm_point_send_reply(&r->query_reply);
+		m->reply_list = rlist;
 	} else {
 		size_t udp_size = r->edns.udp_size;
 		r->edns.edns_version = EDNS_ADVERTISED_VERSION;
@@ -1254,23 +1453,23 @@ mesh_send_reply(struct mesh_state* m, int rcode, struct reply_info* rep,
 		m->s.qinfo.qname = r->qname;
 		m->s.qinfo.local_alias = r->local_alias;
 		if(!inplace_cb_reply_call(m->s.env, &m->s.qinfo, &m->s, rep,
-			LDNS_RCODE_NOERROR, &r->edns, NULL, m->s.region) ||
-			!apply_edns_options(&r->edns, &edns_bak,
-				m->s.env->cfg, r->query_reply.c,
-				m->s.region) ||
+			LDNS_RCODE_NOERROR, &r->edns, &r->query_reply, m->s.region, &r->start_time) ||
 			!reply_info_answer_encode(&m->s.qinfo, rep, r->qid, 
 			r->qflags, r_buffer, 0, 1, m->s.env->scratch,
 			udp_size, &r->edns, (int)(r->edns.bits & EDNS_DO),
 			secure)) 
 		{
 			if(!inplace_cb_reply_servfail_call(m->s.env, &m->s.qinfo, &m->s,
-			rep, LDNS_RCODE_SERVFAIL, &r->edns, NULL, m->s.region))
-				r->edns.opt_list = NULL;
+			rep, LDNS_RCODE_SERVFAIL, &r->edns, &r->query_reply, m->s.region, &r->start_time))
+				r->edns.opt_list_inplace_cb_out = NULL;
+			/* internal server error (probably malloc failure) so no
+			 * EDE (RFC8914) needed */
 			error_encode(r_buffer, LDNS_RCODE_SERVFAIL,
 				&m->s.qinfo, r->qid, r->qflags, &r->edns);
 		}
-		r->edns = edns_bak;
+		m->reply_list = NULL;
 		comm_point_send_reply(&r->query_reply);
+		m->reply_list = rlist;
 	}
 	/* account */
 	log_assert(m->s.env->mesh->num_reply_addrs > 0);
@@ -1292,19 +1491,21 @@ mesh_send_reply(struct mesh_state* m, int rcode, struct reply_info* rep,
 	}
 	/* Log reply sent */
 	if(m->s.env->cfg->log_replies) {
-		log_reply_info(NO_VERBOSE, &m->s.qinfo, &r->query_reply.addr,
-			r->query_reply.addrlen, duration, 0, r_buffer);
+		log_reply_info(NO_VERBOSE, &m->s.qinfo,
+			&r->query_reply.client_addr,
+			r->query_reply.client_addrlen, duration, 0, r_buffer);
 	}
 }
 
 void mesh_query_done(struct mesh_state* mstate)
 {
-	struct mesh_reply* r, *reply_list = NULL;
+	struct mesh_reply* r;
 	struct mesh_reply* prev = NULL;
 	struct sldns_buffer* prev_buffer = NULL;
 	struct mesh_cb* c;
 	struct reply_info* rep = (mstate->s.return_msg?
 		mstate->s.return_msg->rep:NULL);
+	struct timeval tv = {0, 0};
 	/* No need for the serve expired timer anymore; we are going to reply. */
 	if(mstate->s.serve_expired_data) {
 		comm_timer_delete(mstate->s.serve_expired_data->timer);
@@ -1312,7 +1513,7 @@ void mesh_query_done(struct mesh_state* mstate)
 	}
 	if(mstate->s.return_rcode == LDNS_RCODE_SERVFAIL ||
 		(rep && FLAGS_GET_RCODE(rep->flags) == LDNS_RCODE_SERVFAIL)) {
-		/* we are SERVFAILing; check for expired asnwer here */
+		/* we are SERVFAILing; check for expired answer here */
 		mesh_serve_expired_callback(mstate);
 		if((mstate->reply_list || mstate->cb_list)
 		&& mstate->s.env->cfg->log_servfail
@@ -1323,27 +1524,9 @@ void mesh_query_done(struct mesh_state* mstate)
 			free(err);
 		}
 	}
-	if(mstate->reply_list) {
-		/* set the reply_list to NULL during the mesh_query_done
-		 * processing, so that calls back into the mesh from
-		 * tcp_req_info (deciding to drop the reply and thus
-		 * unregister the mesh_reply from the mstate) are stopped
-		 * because the list is empty.
-		 * The mstate is then likely not a reply_state, and maybe
-		 * also a detached_state.
-		 */
-		reply_list = mstate->reply_list;
-		mstate->reply_list = NULL;
-		if(!mstate->reply_list && !mstate->cb_list) {
-			/* was a reply state, not anymore */
-			log_assert(mstate->s.env->mesh->num_reply_states > 0);
-			mstate->s.env->mesh->num_reply_states--;
-		}
-		if(!mstate->reply_list && !mstate->cb_list &&
-			mstate->super_set.count == 0)
-			mstate->s.env->mesh->num_detached_states++;
-	}
-	for(r = reply_list; r; r = r->next) {
+	for(r = mstate->reply_list; r; r = r->next) {
+		tv = r->start_time;
+
 		/* if a response-ip address block has been stored the
 		 *  information should be logged for each client. */
 		if(mstate->s.respip_action_info &&
@@ -1351,7 +1534,8 @@ void mesh_query_done(struct mesh_state* mstate)
 			respip_inform_print(mstate->s.respip_action_info,
 				r->qname, mstate->s.qinfo.qtype,
 				mstate->s.qinfo.qclass, r->local_alias,
-				&r->query_reply);
+				&r->query_reply.client_addr,
+				r->query_reply.client_addrlen);
 			if(mstate->s.env->cfg->stat_extended &&
 				mstate->s.respip_action_info->rpz_used) {
 				if(mstate->s.respip_action_info->rpz_disabled)
@@ -1367,7 +1551,15 @@ void mesh_query_done(struct mesh_state* mstate)
 		/* if this query is determined to be dropped during the
 		 * mesh processing, this is the point to take that action. */
 		if(mstate->s.is_drop) {
+			/* briefly set the reply_list to NULL, so that the
+			 * tcp req info cleanup routine that calls the mesh
+			 * to deregister the meshstate for it is not done
+			 * because the list is NULL and also accounting is not
+			 * done there, but instead we do that here. */
+			struct mesh_reply* reply_list = mstate->reply_list;
+			mstate->reply_list = NULL;
 			comm_point_drop_reply(&r->query_reply);
+			mstate->reply_list = reply_list;
 		} else {
 			struct sldns_buffer* r_buffer = r->query_reply.c->buffer;
 			if(r->query_reply.c->tcp_req_info) {
@@ -1384,6 +1576,17 @@ void mesh_query_done(struct mesh_state* mstate)
 			prev_buffer = r_buffer;
 		}
 	}
+	if(mstate->reply_list) {
+		mstate->reply_list = NULL;
+		if(!mstate->reply_list && !mstate->cb_list) {
+			/* was a reply state, not anymore */
+			log_assert(mstate->s.env->mesh->num_reply_states > 0);
+			mstate->s.env->mesh->num_reply_states--;
+		}
+		if(!mstate->reply_list && !mstate->cb_list &&
+			mstate->super_set.count == 0)
+			mstate->s.env->mesh->num_detached_states++;
+	}
 	mstate->replies_sent = 1;
 	while((c = mstate->cb_list) != NULL) {
 		/* take this cb off the list; so that the list can be
@@ -1397,7 +1600,7 @@ void mesh_query_done(struct mesh_state* mstate)
 		if(!mstate->reply_list && !mstate->cb_list &&
 			mstate->super_set.count == 0)
 			mstate->s.env->mesh->num_detached_states++;
-		mesh_do_callback(mstate, mstate->s.return_rcode, rep, c);
+		mesh_do_callback(mstate, mstate->s.return_rcode, rep, c, &tv);
 	}
 }
 
@@ -1453,12 +1656,15 @@ int mesh_state_add_cb(struct mesh_state* s, struct edns_data* edns,
 	r->cb = cb;
 	r->cb_arg = cb_arg;
 	r->edns = *edns;
-	if(edns->opt_list) {
-		r->edns.opt_list = edns_opt_copy_region(edns->opt_list,
-			s->s.region);
-		if(!r->edns.opt_list)
-			return 0;
-	}
+	if(edns->opt_list_in && !(r->edns.opt_list_in =
+			edns_opt_copy_region(edns->opt_list_in, s->s.region)))
+		return 0;
+	if(edns->opt_list_out && !(r->edns.opt_list_out =
+			edns_opt_copy_region(edns->opt_list_out, s->s.region)))
+		return 0;
+	if(edns->opt_list_inplace_cb_out && !(r->edns.opt_list_inplace_cb_out =
+			edns_opt_copy_region(edns->opt_list_inplace_cb_out, s->s.region)))
+		return 0;
 	r->qid = qid;
 	r->qflags = qflags;
 	r->next = s->cb_list;
@@ -1471,18 +1677,21 @@ int mesh_state_add_reply(struct mesh_state* s, struct edns_data* edns,
         struct comm_reply* rep, uint16_t qid, uint16_t qflags,
         const struct query_info* qinfo)
 {
-	struct mesh_reply* r = regional_alloc(s->s.region, 
+	struct mesh_reply* r = regional_alloc(s->s.region,
 		sizeof(struct mesh_reply));
 	if(!r)
 		return 0;
 	r->query_reply = *rep;
 	r->edns = *edns;
-	if(edns->opt_list) {
-		r->edns.opt_list = edns_opt_copy_region(edns->opt_list,
-			s->s.region);
-		if(!r->edns.opt_list)
-			return 0;
-	}
+	if(edns->opt_list_in && !(r->edns.opt_list_in =
+			edns_opt_copy_region(edns->opt_list_in, s->s.region)))
+		return 0;
+	if(edns->opt_list_out && !(r->edns.opt_list_out =
+			edns_opt_copy_region(edns->opt_list_out, s->s.region)))
+		return 0;
+	if(edns->opt_list_inplace_cb_out && !(r->edns.opt_list_inplace_cb_out =
+			edns_opt_copy_region(edns->opt_list_inplace_cb_out, s->s.region)))
+		return 0;
 	r->qid = qid;
 	r->qflags = qflags;
 	r->start_time = *s->s.env->now_tv;
@@ -1491,6 +1700,8 @@ int mesh_state_add_reply(struct mesh_state* s, struct edns_data* edns,
 		s->s.qinfo.qname_len);
 	if(!r->qname)
 		return 0;
+	if(rep->c->use_h2)
+		r->h2_stream = rep->c->h2_stream;
 
 	/* Data related to local alias stored in 'qinfo' (if any) is ephemeral
 	 * and can be different for different original queries (even if the
@@ -1526,7 +1737,7 @@ int mesh_state_add_reply(struct mesh_state* s, struct edns_data* edns,
 			return 0;
 
 		/* the rrset is not packed, like in the cache, but it is
-		 * individualy allocated with an allocator from localzone. */
+		 * individually allocated with an allocator from localzone. */
 		d = regional_alloc_zero(s->s.region, sizeof(*d));
 		if(!d)
 			return 0;
@@ -1635,6 +1846,7 @@ mesh_continue(struct mesh_area* mesh, struct mesh_state* mstate,
 		if(mstate->s.curmod == 0) {
 			struct query_info* qinfo = NULL;
 			uint16_t qflags;
+			int rpz_p = 0;
 
 			mesh_query_done(mstate);
 			mesh_walk_supers(mesh, mstate);
@@ -1643,13 +1855,15 @@ mesh_continue(struct mesh_area* mesh, struct mesh_state* mstate,
 			 * from an external DNS server, we'll need to schedule
 			 * a prefetch after removing the current state, so
 			 * we need to make a copy of the query info here. */
-			if(mstate->s.need_refetch)
+			if(mstate->s.need_refetch) {
 				mesh_copy_qinfo(mstate, &qinfo, &qflags);
+				rpz_p = mstate->s.rpz_passthru;
+			}
 
 			mesh_state_delete(&mstate->s);
 			if(qinfo) {
 				mesh_schedule_prefetch(mesh, qinfo, qflags,
-					0, 1);
+					0, 1, rpz_p);
 			}
 			return 0;
 		}
@@ -1782,8 +1996,7 @@ mesh_detect_cycle(struct module_qstate* qstate, struct query_info* qinfo,
 {
 	struct mesh_area* mesh = qstate->env->mesh;
 	struct mesh_state* dep_m = NULL;
-	if(!mesh_state_is_unique(qstate->mesh_info))
-		dep_m = mesh_area_find(mesh, NULL, qinfo, flags, prime, valrec);
+	dep_m = mesh_area_find(mesh, NULL, qinfo, flags, prime, valrec);
 	return mesh_detect_cycle_found(qstate, dep_m);
 }
 
@@ -1860,7 +2073,7 @@ apply_respip_action(struct module_qstate* qstate,
 		return 1;
 
 	if(!respip_rewrite_reply(qinfo, cinfo, rep, encode_repp, actinfo,
-		alias_rrset, 0, qstate->region, az))
+		alias_rrset, 0, qstate->region, az, NULL))
 		return 0;
 
 	/* xxx_deny actions mean dropping the reply, unless the original reply
@@ -1891,13 +2104,16 @@ mesh_serve_expired_callback(void* arg)
 	struct respip_action_info actinfo;
 	struct query_info* lookup_qinfo = &qstate->qinfo;
 	struct query_info qinfo_tmp;
+	struct timeval tv = {0, 0};
 	int must_validate = (!(qstate->query_flags&BIT_CD)
 		|| qstate->env->cfg->ignore_cd) && qstate->env->need_to_validate;
 	if(!qstate->serve_expired_data) return;
 	verbose(VERB_ALGO, "Serve expired: Trying to reply with expired data");
 	comm_timer_delete(qstate->serve_expired_data->timer);
 	qstate->serve_expired_data->timer = NULL;
-	if(qstate->blacklist || qstate->no_cache_lookup || qstate->is_drop) {
+	/* If is_drop or no_cache_lookup (modules that handle their own cache e.g.,
+	 * subnetmod) ignore stale data from the main cache. */
+	if(qstate->no_cache_lookup || qstate->is_drop) {
 		verbose(VERB_ALGO,
 			"Serve expired: Not allowed to look into cache for stale");
 		return;
@@ -1907,7 +2123,7 @@ mesh_serve_expired_callback(void* arg)
 	while(1) {
 		fptr_ok(fptr_whitelist_serve_expired_lookup(
 			qstate->serve_expired_data->get_cached_answer));
-		msg = qstate->serve_expired_data->get_cached_answer(qstate,
+		msg = (*qstate->serve_expired_data->get_cached_answer)(qstate,
 			lookup_qinfo);
 		if(!msg)
 			return;
@@ -1961,22 +2177,16 @@ mesh_serve_expired_callback(void* arg)
 	if(verbosity >= VERB_ALGO)
 		log_dns_msg("Serve expired lookup", &qstate->qinfo, msg->rep);
 
-	r = mstate->reply_list;
-	mstate->reply_list = NULL;
-	if(!mstate->reply_list && !mstate->cb_list && r) {
-		log_assert(mesh->num_reply_states > 0);
-		mesh->num_reply_states--;
-		if(mstate->super_set.count == 0) {
-			mesh->num_detached_states++;
-		}
-	}
-	for(; r; r = r->next) {
+	for(r = mstate->reply_list; r; r = r->next) {
+		tv = r->start_time;
+
 		/* If address info is returned, it means the action should be an
 		* 'inform' variant and the information should be logged. */
 		if(actinfo.addrinfo) {
 			respip_inform_print(&actinfo, r->qname,
 				qstate->qinfo.qtype, qstate->qinfo.qclass,
-				r->local_alias, &r->query_reply);
+				r->local_alias, &r->query_reply.client_addr,
+				r->query_reply.client_addrlen);
 
 			if(qstate->env->cfg->stat_extended && actinfo.rpz_used) {
 				if(actinfo.rpz_disabled)
@@ -1987,6 +2197,14 @@ mesh_serve_expired_callback(void* arg)
 					qstate->env->mesh->rpz_action[
 						respip_action_to_rpz_action(actinfo.action)]++;
 			}
+		}
+
+		/* Add EDE Stale Answer (RCF8914). Ignore global ede as this is
+		 * warning instead of an error */
+		if (r->edns.edns_present && qstate->env->cfg->ede_serve_expired &&
+			qstate->env->cfg->ede) {
+			edns_opt_list_append_ede(&r->edns.opt_list_out,
+				mstate->s.region, LDNS_EDE_STALE_ANSWER, NULL);
 		}
 
 		r_buffer = r->query_reply.c->buffer;
@@ -2003,6 +2221,16 @@ mesh_serve_expired_callback(void* arg)
 		mesh->ans_expired++;
 
 	}
+	if(mstate->reply_list) {
+		mstate->reply_list = NULL;
+		if(!mstate->reply_list && !mstate->cb_list) {
+			log_assert(mesh->num_reply_states > 0);
+			mesh->num_reply_states--;
+			if(mstate->super_set.count == 0) {
+				mesh->num_detached_states++;
+			}
+		}
+	}
 	while((c = mstate->cb_list) != NULL) {
 		/* take this cb off the list; so that the list can be
 		 * changed, eg. by adds from the callback routine */
@@ -2015,6 +2243,13 @@ mesh_serve_expired_callback(void* arg)
 		if(!mstate->reply_list && !mstate->cb_list &&
 			mstate->super_set.count == 0)
 			qstate->env->mesh->num_detached_states++;
-		mesh_do_callback(mstate, LDNS_RCODE_NOERROR, msg->rep, c);
+		mesh_do_callback(mstate, LDNS_RCODE_NOERROR, msg->rep, c, &tv);
 	}
+}
+
+int mesh_jostle_exceeded(struct mesh_area* mesh)
+{
+	if(mesh->all.count < mesh->max_reply_states)
+		return 0;
+	return 1;
 }

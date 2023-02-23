@@ -67,6 +67,8 @@ int SERVE_EXPIRED = 0;
 time_t SERVE_EXPIRED_TTL = 0;
 /** TTL to use for expired records */
 time_t SERVE_EXPIRED_REPLY_TTL = 30;
+/** If we serve the original TTL or decrementing TTLs */
+int SERVE_ORIGINAL_TTL = 0;
 
 /** allocate qinfo, return 0 on error */
 static int
@@ -115,6 +117,7 @@ construct_reply_info_base(struct regional* region, uint16_t flags, size_t qd,
 	rep->ar_numrrsets = ar;
 	rep->rrset_count = total;
 	rep->security = sec;
+	rep->reason_bogus = LDNS_EDE_NONE;
 	rep->authoritative = 0;
 	/* array starts after the refs */
 	if(region)
@@ -164,6 +167,32 @@ reply_info_alloc_rrset_keys(struct reply_info* rep, struct alloc_cache* alloc,
 	return 1;
 }
 
+struct reply_info *
+make_new_reply_info(const struct reply_info* rep, struct regional* region,
+	size_t an_numrrsets, size_t copy_rrsets)
+{
+	struct reply_info* new_rep;
+	size_t i;
+
+	/* create a base struct.  we specify 'insecure' security status as
+	 * the modified response won't be DNSSEC-valid.  In our faked response
+	 * the authority and additional sections will be empty (except possible
+	 * EDNS0 OPT RR in the additional section appended on sending it out),
+	 * so the total number of RRsets is an_numrrsets. */
+	new_rep = construct_reply_info_base(region, rep->flags,
+		rep->qdcount, rep->ttl, rep->prefetch_ttl,
+		rep->serve_expired_ttl, an_numrrsets, 0, 0, an_numrrsets,
+		sec_status_insecure);
+	if(!new_rep)
+		return NULL;
+	if(!reply_info_alloc_rrset_keys(new_rep, NULL, region))
+		return NULL;
+	for(i=0; i<copy_rrsets; i++)
+		new_rep->rrsets[i] = rep->rrsets[i];
+
+	return new_rep;
+}
+
 /** find the minimumttl in the rdata of SOA record */
 static time_t
 soa_find_minttl(struct rr_parse* rr)
@@ -194,13 +223,17 @@ rdata_copy(sldns_buffer* pkt, struct packed_rrset_data* data, uint8_t* to,
 		 * minimum-ttl in the rdata of the SOA record */
 		if(*rr_ttl > soa_find_minttl(rr))
 			*rr_ttl = soa_find_minttl(rr);
+	}
+	if(!SERVE_ORIGINAL_TTL && (*rr_ttl < MIN_TTL))
+		*rr_ttl = MIN_TTL;
+	if(!SERVE_ORIGINAL_TTL && (*rr_ttl > MAX_TTL))
+		*rr_ttl = MAX_TTL;
+	if(type == LDNS_RR_TYPE_SOA && section == LDNS_SECTION_AUTHORITY) {
+		/* max neg ttl overrides the min and max ttl of everything
+		 * else, it is for a more specific record */
 		if(*rr_ttl > MAX_NEG_TTL)
 			*rr_ttl = MAX_NEG_TTL;
 	}
-	if(*rr_ttl < MIN_TTL)
-		*rr_ttl = MIN_TTL;
-	if(*rr_ttl > MAX_TTL)
-		*rr_ttl = MAX_TTL;
 	if(*rr_ttl < data->ttl)
 		data->ttl = *rr_ttl;
 
@@ -321,13 +354,16 @@ parse_create_rrset(sldns_buffer* pkt, struct rrset_parse* pset,
 		(sizeof(size_t)+sizeof(uint8_t*)+sizeof(time_t)) + 
 		pset->size;
 	if(region)
-		*data = regional_alloc(region, s);
-	else	*data = malloc(s);
+		*data = regional_alloc_zero(region, s);
+	else	*data = calloc(1, s);
 	if(!*data)
 		return 0;
 	/* copy & decompress */
 	if(!parse_rr_copy(pkt, pset, *data)) {
-		if(!region) free(*data);
+		if(!region) {
+			free(*data);
+			*data = NULL;
+		}
 		return 0;
 	}
 	return 1;
@@ -392,8 +428,13 @@ parse_copy_decompress_rrset(sldns_buffer* pkt, struct msg_parse* msg,
 	pk->rk.type = htons(pset->type);
 	pk->rk.rrset_class = pset->rrset_class;
 	/** read data part. */
-	if(!parse_create_rrset(pkt, pset, &data, region))
+	if(!parse_create_rrset(pkt, pset, &data, region)) {
+		if(!region) {
+			free(pk->rk.dname);
+			pk->rk.dname = NULL;
+		}
 		return 0;
+	}
 	pk->entry.data = (void*)data;
 	pk->entry.key = (void*)pk;
 	pk->entry.hash = pset->hash;
@@ -478,14 +519,13 @@ int reply_info_parse(sldns_buffer* pkt, struct alloc_cache* alloc,
 	if((ret = parse_packet(pkt, msg, region)) != 0) {
 		return ret;
 	}
-	if((ret = parse_extract_edns(msg, edns, region)) != 0)
+	if((ret = parse_extract_edns_from_response_msg(msg, edns, region)) != 0)
 		return ret;
 
 	/* parse OK, allocate return structures */
 	/* this also performs dname decompression */
 	if(!parse_create_msg(pkt, msg, alloc, qinf, rep, NULL)) {
 		query_info_clear(qinf);
-		reply_info_parsedelete(*rep, alloc);
 		*rep = NULL;
 		return LDNS_RCODE_SERVFAIL;
 	}
@@ -526,6 +566,7 @@ reply_info_set_ttls(struct reply_info* rep, time_t timenow)
 		for(j=0; j<data->count + data->rrsig_count; j++) {
 			data->rr_ttl[j] += timenow;
 		}
+		data->ttl_add = timenow;
 	}
 }
 
@@ -822,9 +863,15 @@ log_dns_msg(const char* str, struct query_info* qinfo, struct reply_info* rep)
 	/* not particularly fast but flexible, make wireformat and print */
 	sldns_buffer* buf = sldns_buffer_new(65535);
 	struct regional* region = regional_create();
-	if(!reply_info_encode(qinfo, rep, 0, rep->flags, buf, 0, 
+	if(!(buf && region)) {
+		log_err("%s: log_dns_msg: out of memory", str);
+		sldns_buffer_free(buf);
+		regional_destroy(region);
+		return;
+	}
+	if(!reply_info_encode(qinfo, rep, 0, rep->flags, buf, 0,
 		region, 65535, 1, 0)) {
-		log_info("%s: log_dns_msg: out of memory", str);
+		log_err("%s: log_dns_msg: out of memory", str);
 	} else {
 		char* s = sldns_wire2str_pkt(sldns_buffer_begin(buf),
 			sldns_buffer_limit(buf));
@@ -943,30 +990,32 @@ parse_reply_in_temp_region(sldns_buffer* pkt, struct regional* region,
 	return rep;
 }
 
-int edns_opt_append(struct edns_data* edns, struct regional* region,
-	uint16_t code, size_t len, uint8_t* data)
+int edns_opt_list_append_ede(struct edns_option** list, struct regional* region,
+	sldns_ede_code code, const char *txt)
 {
 	struct edns_option** prevp;
 	struct edns_option* opt;
+	size_t txt_len = txt ? strlen(txt) : 0;
 
 	/* allocate new element */
 	opt = (struct edns_option*)regional_alloc(region, sizeof(*opt));
 	if(!opt)
 		return 0;
 	opt->next = NULL;
-	opt->opt_code = code;
-	opt->opt_len = len;
-	opt->opt_data = NULL;
-	if(len > 0) {
-		opt->opt_data = regional_alloc_init(region, data, len);
-		if(!opt->opt_data)
-			return 0;
-	}
-	
+	opt->opt_code = LDNS_EDNS_EDE;
+	opt->opt_len = txt_len + sizeof(uint16_t);
+	opt->opt_data = regional_alloc(region, txt_len + sizeof(uint16_t));
+	if(!opt->opt_data)
+		return 0;
+	sldns_write_uint16(opt->opt_data, (uint16_t)code);
+	if (txt_len)
+		memmove(opt->opt_data + 2, txt, txt_len);
+
 	/* append at end of list */
-	prevp = &edns->opt_list;
+	prevp = list;
 	while(*prevp != NULL)
 		prevp = &((*prevp)->next);
+	verbose(VERB_ALGO, "attached EDE code: %d with message: %s", code, (txt?txt:"\"\""));
 	*prevp = opt;
 	return 1;
 }
@@ -1035,7 +1084,8 @@ static int inplace_cb_reply_call_generic(
     struct inplace_cb* callback_list, enum inplace_cb_list_type type,
 	struct query_info* qinfo, struct module_qstate* qstate,
 	struct reply_info* rep, int rcode, struct edns_data* edns,
-	struct comm_reply* repinfo, struct regional* region)
+	struct comm_reply* repinfo, struct regional* region,
+	struct timeval* start_time)
 {
 	struct inplace_cb* cb;
 	struct edns_option* opt_list_out = NULL;
@@ -1048,45 +1098,49 @@ static int inplace_cb_reply_call_generic(
 		fptr_ok(fptr_whitelist_inplace_cb_reply_generic(
 			(inplace_cb_reply_func_type*)cb->cb, type));
 		(void)(*(inplace_cb_reply_func_type*)cb->cb)(qinfo, qstate, rep,
-			rcode, edns, &opt_list_out, repinfo, region, cb->id, cb->cb_arg);
+			rcode, edns, &opt_list_out, repinfo, region, start_time, cb->id, cb->cb_arg);
 	}
-	edns->opt_list = opt_list_out;
+	edns->opt_list_inplace_cb_out = opt_list_out;
 	return 1;
 }
 
 int inplace_cb_reply_call(struct module_env* env, struct query_info* qinfo,
 	struct module_qstate* qstate, struct reply_info* rep, int rcode,
-	struct edns_data* edns, struct comm_reply* repinfo, struct regional* region)
+	struct edns_data* edns, struct comm_reply* repinfo, struct regional* region,
+	struct timeval* start_time)
 {
 	return inplace_cb_reply_call_generic(
 		env->inplace_cb_lists[inplace_cb_reply], inplace_cb_reply, qinfo,
-		qstate, rep, rcode, edns, repinfo, region);
+		qstate, rep, rcode, edns, repinfo, region, start_time);
 }
 
 int inplace_cb_reply_cache_call(struct module_env* env,
 	struct query_info* qinfo, struct module_qstate* qstate,
 	struct reply_info* rep, int rcode, struct edns_data* edns,
-	struct comm_reply* repinfo, struct regional* region)
+	struct comm_reply* repinfo, struct regional* region,
+	struct timeval* start_time)
 {
 	return inplace_cb_reply_call_generic(
 		env->inplace_cb_lists[inplace_cb_reply_cache], inplace_cb_reply_cache,
-		qinfo, qstate, rep, rcode, edns, repinfo, region);
+		qinfo, qstate, rep, rcode, edns, repinfo, region, start_time);
 }
 
 int inplace_cb_reply_local_call(struct module_env* env,
 	struct query_info* qinfo, struct module_qstate* qstate,
 	struct reply_info* rep, int rcode, struct edns_data* edns,
-	struct comm_reply* repinfo, struct regional* region)
+	struct comm_reply* repinfo, struct regional* region,
+	struct timeval* start_time)
 {
 	return inplace_cb_reply_call_generic(
 		env->inplace_cb_lists[inplace_cb_reply_local], inplace_cb_reply_local,
-		qinfo, qstate, rep, rcode, edns, repinfo, region);
+		qinfo, qstate, rep, rcode, edns, repinfo, region, start_time);
 }
 
 int inplace_cb_reply_servfail_call(struct module_env* env,
 	struct query_info* qinfo, struct module_qstate* qstate,
 	struct reply_info* rep, int rcode, struct edns_data* edns,
-	struct comm_reply* repinfo, struct regional* region)
+	struct comm_reply* repinfo, struct regional* region,
+	struct timeval* start_time)
 {
 	/* We are going to servfail. Remove any potential edns options. */
 	if(qstate)
@@ -1094,7 +1148,7 @@ int inplace_cb_reply_servfail_call(struct module_env* env,
 	return inplace_cb_reply_call_generic(
 		env->inplace_cb_lists[inplace_cb_reply_servfail],
 		inplace_cb_reply_servfail, qinfo, qstate, rep, rcode, edns, repinfo,
-		region);
+		region, start_time);
 }
 
 int inplace_cb_query_call(struct module_env* env, struct query_info* qinfo,

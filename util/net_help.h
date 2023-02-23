@@ -42,6 +42,7 @@
 #ifndef NET_HELP_H
 #define NET_HELP_H
 #include "util/log.h"
+#include "util/random.h"
 struct sock_list;
 struct regional;
 struct config_strlist;
@@ -76,8 +77,6 @@ struct config_strlist;
 
 /** timeout in milliseconds for UDP queries to auth servers. */
 #define UDP_AUTH_QUERY_TIMEOUT 3000
-/** timeout in milliseconds for TCP queries to auth servers. */
-#define TCP_AUTH_QUERY_TIMEOUT 3000
 /** Advertised version of EDNS capabilities */
 #define EDNS_ADVERTISED_VERSION         0
 /** Advertised size of EDNS capabilities */
@@ -93,6 +92,14 @@ extern uint16_t EDNS_ADVERTISED_SIZE;
 #define DNSKEY_BIT_ZSK 0x0100
 /** DNSKEY secure entry point, KSK flag */
 #define DNSKEY_BIT_SEP 0x0001
+
+/** return a random 16-bit number given a random source */
+#define GET_RANDOM_ID(rnd) (((unsigned)ub_random(rnd)>>8) & 0xffff)
+
+/** define MSG_DONTWAIT for unsupported platforms */
+#ifndef MSG_DONTWAIT
+#define MSG_DONTWAIT 0
+#endif
 
 /** minimal responses when positive answer */
 extern int MINIMAL_RESPONSES;
@@ -176,10 +183,11 @@ void log_err_addr(const char* str, const char* err,
  * @param str: the string
  * @param addr: where to store sockaddr.
  * @param addrlen: length of stored sockaddr is returned.
+ * @param port: default port.
  * @return 0 on error.
  */
 int extstrtoaddr(const char* str, struct sockaddr_storage* addr, 
-	socklen_t* addrlen);
+	socklen_t* addrlen, int port);
 
 /**
  * Convert ip address string and port to sockaddr.
@@ -208,16 +216,29 @@ int netblockstrtoaddr(const char* ip, int port, struct sockaddr_storage* addr,
 /**
  * Convert address string, with "@port" appendix, to sockaddr.
  * It can also have an "#tls-auth-name" appendix (after the port).
- * The returned tls-auth-name string is a pointer into the input string.
- * Uses DNS port by default.
+ * The returned auth_name string is a pointer into the input string.
+ * Uses DNS port by default; TLS port when a "#tls-auth-name" is configured.
  * @param str: the string
  * @param addr: where to store sockaddr.
  * @param addrlen: length of stored sockaddr is returned.
  * @param auth_name: returned pointer to tls_auth_name, or NULL if none.
  * @return 0 on error.
  */
-int authextstrtoaddr(char* str, struct sockaddr_storage* addr, 
+int authextstrtoaddr(char* str, struct sockaddr_storage* addr,
 	socklen_t* addrlen, char** auth_name);
+
+/**
+ * Convert domain string, with "@port" appendix, to dname.
+ * It can also have an "#tls-auth-name" appendix (after the port).
+ * The return port is the parsed port.
+ * Uses DNS port by default; TLS port when a "#tls-auth-name" is configured.
+ * The returned auth_name string is a pointer into the input string.
+ * @param str: the string
+ * @param port: pointer to be assigned the parsed port value.
+ * @param auth_name: returned pointer to tls_auth_name, or NULL if none.
+ * @return pointer to the dname.
+ */
+uint8_t* authextstrtodname(char* str, int* port, char** auth_name);
 
 /**
  * Store port number into sockaddr structure
@@ -478,20 +499,6 @@ void ub_openssl_lock_delete(void);
 int listen_sslctx_setup_ticket_keys(void* sslctx,
 	struct config_strlist* tls_session_ticket_keys);
 
-/**
- * callback TLS session ticket encrypt and decrypt
- * For use with SSL_CTX_set_tlsext_ticket_key_cb
- * @param s: the SSL_CTX to use (from connect_sslctx_create())
- * @param key_name: secret name, 16 bytes
- * @param iv: up to EVP_MAX_IV_LENGTH.
- * @param evp_ctx: the evp cipher context, function sets this.
- * @param hmac_ctx: the hmax context, function sets this.
- * @param enc: 1 is encrypt, 0 is decrypt
- * @return 0 on no ticket, 1 for okay, and 2 for okay but renew the ticket
- * 	(the ticket is decrypt only). and <0 for failures.
- */
-int tls_session_ticket_key_cb(void *s, unsigned char* key_name,unsigned char* iv, void *evp_ctx, void *hmac_ctx, int enc);
-
 /** Free memory used for TLS session ticket keys */
 void listen_sslctx_delete_ticket_keys(void);
 
@@ -510,4 +517,10 @@ void listen_sslctx_delete_ticket_keys(void);
  */
 int netblockdnametoaddr(uint8_t* dname, size_t dnamelen,
 	struct sockaddr_storage* addr, socklen_t* addrlen, int* net, int* af);
+
+/** Return strerror or wsastrerror for socket error printout */
+char* sock_strerror(int errn);
+/** close the socket with close, or wsa closesocket */
+void sock_close(int socket);
+
 #endif /* NET_HELP_H */

@@ -7,7 +7,7 @@
 . ../common.sh
 
 PRE="../.."
-if grep "define USE_DNSTAP 1" $PRE/config.h; then echo test enabled; else echo test skipped; exit 0; fi
+if grep "define USE_DNSTAP 1" $PRE/config.h; then echo test enabled; else skip_test "test skipped"; fi
 
 get_random_port 3
 UNBOUND_PORT=$RND_PORT
@@ -45,7 +45,7 @@ fi
 # make config file
 sed -e 's/@PORT\@/'$UNBOUND_PORT'/' -e 's/@TOPORT\@/'$FWD_PORT'/' -e 's/@CONTROL_PORT\@/'$CONTROL_PORT'/' < dnstap.conf > ub.conf
 # start unbound in the background
-$PRE/unbound -d -c ub.conf >unbound.log 2>&1 &
+$PRE/unbound -d -c ub.conf -vvvv >unbound.log 2>&1 &
 UNBOUND_PID=$!
 echo "UNBOUND_PID=$UNBOUND_PID" >> .tpkg.var.test
 

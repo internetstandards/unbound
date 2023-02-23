@@ -96,8 +96,13 @@ enum localzone_type {
 	local_zone_always_nodata,
 	/** drop query, even when there is local data */
 	local_zone_always_deny,
+	/** answer with 0.0.0.0 or ::0 or noerror/nodata, even when there is
+	 * local data */
+	local_zone_always_null,
 	/** answer not from the view, but global or no-answer */
 	local_zone_noview,
+	/** truncate the response; client should retry via tcp */
+	local_zone_truncate,
 	/** Invalid type, cannot be used to generate answer */
 	local_zone_invalid
 };
@@ -155,6 +160,10 @@ struct local_zone {
 	rbtree_type data;
 	/** if data contains zone apex SOA data, this is a ptr to it. */
 	struct ub_packed_rrset_key* soa;
+	/** if data contains zone apex SOA data, this is a ptr to an
+	 * artificial negative SOA rrset (TTL is the minimum of the TTL and the
+	 * SOA.MINIMUM). */
+	struct ub_packed_rrset_key* soa_negative;
 };
 
 /**
@@ -248,7 +257,7 @@ void local_zone_delete(struct local_zone* z);
  * @param dclass: class to lookup.
  * @param dtype: type to lookup, if type DS a zone higher is used for zonecuts.
  * @param taglist: taglist to lookup.
- * @param taglen: lenth of taglist.
+ * @param taglen: length of taglist.
  * @param ignoretags: lookup zone by name and class, regardless the
  * local-zone's tags.
  * @return closest local_zone or NULL if no covering zone is found.
@@ -556,6 +565,8 @@ enum respip_action {
 	respip_always_nodata = local_zone_always_nodata,
         /** answer with nodata response */
 	respip_always_deny = local_zone_always_deny,
+	/** RPZ: truncate answer in order to force switch to tcp */
+	respip_truncate = local_zone_truncate,
 
 	/* The rest of the values are only possible as
 	 * access-control-tag-action */
