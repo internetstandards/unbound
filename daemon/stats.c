@@ -70,6 +70,9 @@
 #include <openssl/ssl.h>
 #endif
 
+/** How long to wait for threads to transmit statistics, in msec. */
+#define STATS_THREAD_WAIT 60000
+
 /** add timers and the values do not overflow or become negative */
 static void
 stats_timeval_add(long long* d_sec, long long* d_usec, long long add_sec, long long add_usec)
@@ -137,7 +140,7 @@ static void
 set_subnet_stats(struct worker* worker, struct ub_server_stats* svr,
 	int reset)
 {
-	int m = modstack_find(&worker->env.mesh->mods, "subnet");
+	int m = modstack_find(&worker->env.mesh->mods, "subnetcache");
 	struct subnet_env* sne;
 	if(m == -1)
 		return;
@@ -271,6 +274,7 @@ server_stats_compile(struct worker* worker, struct ub_stats_info* s, int reset)
 	s->svr.ans_secure += (long long)worker->env.mesh->ans_secure;
 	s->svr.ans_bogus += (long long)worker->env.mesh->ans_bogus;
 	s->svr.ans_rcode_nodata += (long long)worker->env.mesh->ans_nodata;
+	s->svr.ans_expired += (long long)worker->env.mesh->ans_expired;
 	for(i=0; i<UB_STATS_RCODE_NUM; i++)
 		s->svr.ans_rcode[i] += (long long)worker->env.mesh->ans_rcode[i];
 	for(i=0; i<UB_STATS_RPZ_ACTION_NUM; i++)
@@ -280,6 +284,7 @@ server_stats_compile(struct worker* worker, struct ub_stats_info* s, int reset)
 	/* values from outside network */
 	s->svr.unwanted_replies = (long long)worker->back->unwanted_replies;
 	s->svr.qtcp_outgoing = (long long)worker->back->num_tcp_outgoing;
+	s->svr.qudp_outgoing = (long long)worker->back->num_udp_outgoing;
 
 	/* get and reset validator rrset bogus number */
 	s->svr.rrset_bogus = (long long)get_rrset_bogus(worker, reset);
@@ -335,6 +340,10 @@ server_stats_compile(struct worker* worker, struct ub_stats_info* s, int reset)
 	}
 	s->svr.mem_stream_wait =
 		(long long)tcp_req_info_get_stream_buffer_size();
+	s->svr.mem_http2_query_buffer =
+		(long long)http2_get_query_buffer_size();
+	s->svr.mem_http2_response_buffer =
+		(long long)http2_get_response_buffer_size();
 
 	/* Set neg cache usage numbers */
 	set_neg_cache_stats(worker, &s->svr, reset);
@@ -374,6 +383,28 @@ void server_stats_obtain(struct worker* worker, struct worker* who,
 		worker_send_cmd(who, worker_cmd_stats);
 	else 	worker_send_cmd(who, worker_cmd_stats_noreset);
 	verbose(VERB_ALGO, "wait for stats reply");
+	if(tube_wait_timeout(worker->cmd, STATS_THREAD_WAIT) == 0) {
+		verbose(VERB_OPS, "no response from thread %d"
+#ifdef HAVE_GETTID
+			" LWP %u"
+#endif
+#if defined(HAVE_PTHREAD) && defined(SIZEOF_PTHREAD_T) && defined(SIZEOF_UNSIGNED_LONG)
+#  if SIZEOF_PTHREAD_T == SIZEOF_UNSIGNED_LONG
+			" pthread 0x%lx"
+#  endif
+#endif
+			,
+			who->thread_num
+#ifdef HAVE_GETTID
+			, (unsigned)who->thread_tid
+#endif
+#if defined(HAVE_PTHREAD) && defined(SIZEOF_PTHREAD_T) && defined(SIZEOF_UNSIGNED_LONG)
+#  if SIZEOF_PTHREAD_T == SIZEOF_UNSIGNED_LONG
+			, (unsigned long)*((unsigned long*)&who->thr_id)
+#  endif
+#endif
+			);
+	}
 	if(!tube_read_msg(worker->cmd, &reply, &len, 0))
 		fatal_exit("failed to read stats over cmd channel");
 	if(len != (uint32_t)sizeof(*s))
@@ -419,8 +450,10 @@ void server_stats_add(struct ub_stats_info* total, struct ub_stats_info* a)
 		total->svr.qclass_big += a->svr.qclass_big;
 		total->svr.qtcp += a->svr.qtcp;
 		total->svr.qtcp_outgoing += a->svr.qtcp_outgoing;
+		total->svr.qudp_outgoing += a->svr.qudp_outgoing;
 		total->svr.qtls += a->svr.qtls;
 		total->svr.qtls_resume += a->svr.qtls_resume;
+		total->svr.qhttps += a->svr.qhttps;
 		total->svr.qipv6 += a->svr.qipv6;
 		total->svr.qbit_QR += a->svr.qbit_QR;
 		total->svr.qbit_AA += a->svr.qbit_AA;
@@ -484,9 +517,11 @@ void server_stats_insquery(struct ub_server_stats* stats, struct comm_point* c,
 			if(SSL_session_reused(c->ssl)) 
 				stats->qtls_resume++;
 #endif
+			if(c->type == comm_http)
+				stats->qhttps++;
 		}
 	}
-	if(repinfo && addr_is_ip6(&repinfo->addr, repinfo->addrlen))
+	if(repinfo && addr_is_ip6(&repinfo->remote_addr, repinfo->remote_addrlen))
 		stats->qipv6++;
 	if( (flags&BIT_QR) )
 		stats->qbit_QR++;

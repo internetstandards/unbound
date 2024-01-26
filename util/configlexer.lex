@@ -45,11 +45,13 @@ struct inc_state {
 	int line;
 	YY_BUFFER_STATE buffer;
 	struct inc_state* next;
+	int inc_toplevel;
 };
 static struct inc_state* config_include_stack = NULL;
 static int inc_depth = 0;
 static int inc_prev = 0;
 static int num_args = 0;
+static int inc_toplevel = 0;
 
 void init_cfg_parse(void)
 {
@@ -57,14 +59,15 @@ void init_cfg_parse(void)
 	inc_depth = 0;
 	inc_prev = 0;
 	num_args = 0;
+	inc_toplevel = 0;
 }
 
-static void config_start_include(const char* filename)
+static void config_start_include(const char* filename, int toplevel)
 {
 	FILE *input;
 	struct inc_state* s;
 	char* nm;
-	if(inc_depth++ > 100000) {
+	if(inc_depth+1 > 100000) {
 		ub_c_error_msg("too many include files");
 		return;
 	}
@@ -96,17 +99,20 @@ static void config_start_include(const char* filename)
 		return;
 	}
 	LEXOUT(("switch_to_include_file(%s)\n", filename));
+	inc_depth++;
 	s->filename = cfg_parser->filename;
 	s->line = cfg_parser->line;
 	s->buffer = YY_CURRENT_BUFFER;
+	s->inc_toplevel = inc_toplevel;
 	s->next = config_include_stack;
 	config_include_stack = s;
 	cfg_parser->filename = nm;
 	cfg_parser->line = 1;
+	inc_toplevel = toplevel;
 	yy_switch_to_buffer(yy_create_buffer(input, YY_BUF_SIZE));
 }
 
-static void config_start_include_glob(const char* filename)
+static void config_start_include_glob(const char* filename, int toplevel)
 {
 
 	/* check for wildcards */
@@ -139,19 +145,19 @@ static void config_start_include_glob(const char* filename)
 			globfree(&g);
 			if(r == GLOB_NOMATCH)
 				return; /* no matches for pattern */
-			config_start_include(filename); /* let original deal with it */
+			config_start_include(filename, toplevel); /* let original deal with it */
 			return;
 		}
 		/* process files found, if any */
 		for(i=(int)g.gl_pathc-1; i>=0; i--) {
-			config_start_include(g.gl_pathv[i]);
+			config_start_include(g.gl_pathv[i], toplevel);
 		}
 		globfree(&g);
 		return;
 	}
 #endif /* HAVE_GLOB */
 
-	config_start_include(filename);
+	config_start_include(filename, toplevel);
 }
 
 static void config_end_include(void)
@@ -165,6 +171,7 @@ static void config_end_include(void)
 	yy_delete_buffer(YY_CURRENT_BUFFER);
 	yy_switch_to_buffer(s->buffer);
 	config_include_stack = s->next;
+	inc_toplevel = s->inc_toplevel;
 	free(s);
 }
 
@@ -199,7 +206,7 @@ COLON 	\:
 DQANY     [^\"\n\r\\]|\\.
 SQANY     [^\'\n\r\\]|\\.
 
-%x	quotedstring singlequotedstr include include_quoted val
+%x	quotedstring singlequotedstr include include_quoted val include_toplevel include_toplevel_quoted
 
 %%
 <INITIAL,val>{SPACE}*	{ 
@@ -228,6 +235,9 @@ tcp-upstream{COLON}		{ YDVAR(1, VAR_TCP_UPSTREAM) }
 tcp-mss{COLON}			{ YDVAR(1, VAR_TCP_MSS) }
 outgoing-tcp-mss{COLON}		{ YDVAR(1, VAR_OUTGOING_TCP_MSS) }
 tcp-idle-timeout{COLON}		{ YDVAR(1, VAR_TCP_IDLE_TIMEOUT) }
+max-reuse-tcp-queries{COLON}	{ YDVAR(1, VAR_MAX_REUSE_TCP_QUERIES) }
+tcp-reuse-timeout{COLON}	{ YDVAR(1, VAR_TCP_REUSE_TIMEOUT) }
+tcp-auth-query-timeout{COLON}	{ YDVAR(1, VAR_TCP_AUTH_QUERY_TIMEOUT) }
 edns-tcp-keepalive{COLON}	{ YDVAR(1, VAR_EDNS_TCP_KEEPALIVE) }
 edns-tcp-keepalive-timeout{COLON} { YDVAR(1, VAR_EDNS_TCP_KEEPALIVE_TIMEOUT) }
 ssl-upstream{COLON}		{ YDVAR(1, VAR_SSL_UPSTREAM) }
@@ -241,6 +251,7 @@ tls-port{COLON}			{ YDVAR(1, VAR_SSL_PORT) }
 ssl-cert-bundle{COLON}		{ YDVAR(1, VAR_TLS_CERT_BUNDLE) }
 tls-cert-bundle{COLON}		{ YDVAR(1, VAR_TLS_CERT_BUNDLE) }
 tls-win-cert{COLON}		{ YDVAR(1, VAR_TLS_WIN_CERT) }
+tls-system-cert{COLON}		{ YDVAR(1, VAR_TLS_WIN_CERT) }
 additional-ssl-port{COLON}	{ YDVAR(1, VAR_TLS_ADDITIONAL_PORT) }
 additional-tls-port{COLON}	{ YDVAR(1, VAR_TLS_ADDITIONAL_PORT) }
 tls-additional-ports{COLON}	{ YDVAR(1, VAR_TLS_ADDITIONAL_PORT) }
@@ -249,12 +260,20 @@ tls-session-ticket-keys{COLON}	{ YDVAR(1, VAR_TLS_SESSION_TICKET_KEYS) }
 tls-ciphers{COLON}		{ YDVAR(1, VAR_TLS_CIPHERS) }
 tls-ciphersuites{COLON}		{ YDVAR(1, VAR_TLS_CIPHERSUITES) }
 tls-use-sni{COLON}		{ YDVAR(1, VAR_TLS_USE_SNI) }
+https-port{COLON}		{ YDVAR(1, VAR_HTTPS_PORT) }
+http-endpoint{COLON}		{ YDVAR(1, VAR_HTTP_ENDPOINT) }
+http-max-streams{COLON}		{ YDVAR(1, VAR_HTTP_MAX_STREAMS) }
+http-query-buffer-size{COLON}	{ YDVAR(1, VAR_HTTP_QUERY_BUFFER_SIZE) }
+http-response-buffer-size{COLON} { YDVAR(1, VAR_HTTP_RESPONSE_BUFFER_SIZE) }
+http-nodelay{COLON}		{ YDVAR(1, VAR_HTTP_NODELAY) }
+http-notls-downstream{COLON}	{ YDVAR(1, VAR_HTTP_NOTLS_DOWNSTREAM) }
 use-systemd{COLON}		{ YDVAR(1, VAR_USE_SYSTEMD) }
 do-daemonize{COLON}		{ YDVAR(1, VAR_DO_DAEMONIZE) }
 interface{COLON}		{ YDVAR(1, VAR_INTERFACE) }
 ip-address{COLON}		{ YDVAR(1, VAR_INTERFACE) }
 outgoing-interface{COLON}	{ YDVAR(1, VAR_OUTGOING_INTERFACE) }
 interface-automatic{COLON}	{ YDVAR(1, VAR_INTERFACE_AUTOMATIC) }
+interface-automatic-ports{COLON} { YDVAR(1, VAR_INTERFACE_AUTOMATIC_PORTS) }
 so-rcvbuf{COLON}		{ YDVAR(1, VAR_SO_RCVBUF) }
 so-sndbuf{COLON}		{ YDVAR(1, VAR_SO_SNDBUF) }
 so-reuseport{COLON}		{ YDVAR(1, VAR_SO_REUSEPORT) }
@@ -283,9 +302,12 @@ infra-cache-slabs{COLON}	{ YDVAR(1, VAR_INFRA_CACHE_SLABS) }
 infra-cache-numhosts{COLON}	{ YDVAR(1, VAR_INFRA_CACHE_NUMHOSTS) }
 infra-cache-lame-size{COLON}	{ YDVAR(1, VAR_INFRA_CACHE_LAME_SIZE) }
 infra-cache-min-rtt{COLON}	{ YDVAR(1, VAR_INFRA_CACHE_MIN_RTT) }
+infra-cache-max-rtt{COLON}	{ YDVAR(1, VAR_INFRA_CACHE_MAX_RTT) }
+infra-keep-probing{COLON}	{ YDVAR(1, VAR_INFRA_KEEP_PROBING) }
 num-queries-per-thread{COLON}	{ YDVAR(1, VAR_NUM_QUERIES_PER_THREAD) }
 jostle-timeout{COLON}		{ YDVAR(1, VAR_JOSTLE_TIMEOUT) }
 delay-close{COLON}		{ YDVAR(1, VAR_DELAY_CLOSE) }
+udp-connect{COLON}		{ YDVAR(1, VAR_UDP_CONNECT) }
 target-fetch-policy{COLON}	{ YDVAR(1, VAR_TARGET_FETCH_POLICY) }
 harden-short-bufsize{COLON}	{ YDVAR(1, VAR_HARDEN_SHORT_BUFSIZE) }
 harden-large-queries{COLON}	{ YDVAR(1, VAR_HARDEN_LARGE_QUERIES) }
@@ -296,6 +318,7 @@ harden-referral-path{COLON}	{ YDVAR(1, VAR_HARDEN_REFERRAL_PATH) }
 harden-algo-downgrade{COLON}	{ YDVAR(1, VAR_HARDEN_ALGO_DOWNGRADE) }
 use-caps-for-id{COLON}		{ YDVAR(1, VAR_USE_CAPS_FOR_ID) }
 caps-whitelist{COLON}		{ YDVAR(1, VAR_CAPS_WHITELIST) }
+caps-exempt{COLON}		{ YDVAR(1, VAR_CAPS_WHITELIST) }
 unwanted-reply-threshold{COLON}	{ YDVAR(1, VAR_UNWANTED_REPLY_THRESHOLD) }
 private-address{COLON}		{ YDVAR(1, VAR_PRIVATE_ADDRESS) }
 private-domain{COLON}		{ YDVAR(1, VAR_PRIVATE_DOMAIN) }
@@ -311,6 +334,7 @@ stub-first{COLON}		{ YDVAR(1, VAR_STUB_FIRST) }
 stub-no-cache{COLON}		{ YDVAR(1, VAR_STUB_NO_CACHE) }
 stub-ssl-upstream{COLON}	{ YDVAR(1, VAR_STUB_SSL_UPSTREAM) }
 stub-tls-upstream{COLON}	{ YDVAR(1, VAR_STUB_SSL_UPSTREAM) }
+stub-tcp-upstream{COLON}	{ YDVAR(1, VAR_STUB_TCP_UPSTREAM) }
 forward-zone{COLON}		{ YDVAR(0, VAR_FORWARD_ZONE) }
 forward-addr{COLON}		{ YDVAR(1, VAR_FORWARD_ADDR) }
 forward-host{COLON}		{ YDVAR(1, VAR_FORWARD_HOST) }
@@ -318,6 +342,7 @@ forward-first{COLON}		{ YDVAR(1, VAR_FORWARD_FIRST) }
 forward-no-cache{COLON}		{ YDVAR(1, VAR_FORWARD_NO_CACHE) }
 forward-ssl-upstream{COLON}	{ YDVAR(1, VAR_FORWARD_SSL_UPSTREAM) }
 forward-tls-upstream{COLON}	{ YDVAR(1, VAR_FORWARD_SSL_UPSTREAM) }
+forward-tcp-upstream{COLON}	{ YDVAR(1, VAR_FORWARD_TCP_UPSTREAM) }
 auth-zone{COLON}		{ YDVAR(0, VAR_AUTH_ZONE) }
 rpz{COLON}			{ YDVAR(0, VAR_RPZ) }
 tags{COLON}			{ YDVAR(1, VAR_TAGS) }
@@ -325,8 +350,10 @@ rpz-action-override{COLON}	{ YDVAR(1, VAR_RPZ_ACTION_OVERRIDE) }
 rpz-cname-override{COLON}	{ YDVAR(1, VAR_RPZ_CNAME_OVERRIDE) }
 rpz-log{COLON}			{ YDVAR(1, VAR_RPZ_LOG) }
 rpz-log-name{COLON}		{ YDVAR(1, VAR_RPZ_LOG_NAME) }
+rpz-signal-nxdomain-ra{COLON}	{ YDVAR(1, VAR_RPZ_SIGNAL_NXDOMAIN_RA) }
 zonefile{COLON}			{ YDVAR(1, VAR_ZONEFILE) }
 master{COLON}			{ YDVAR(1, VAR_MASTER) }
+primary{COLON}			{ YDVAR(1, VAR_MASTER) }
 url{COLON}			{ YDVAR(1, VAR_URL) }
 allow-notify{COLON}		{ YDVAR(1, VAR_ALLOW_NOTIFY) }
 for-downstream{COLON}		{ YDVAR(1, VAR_FOR_DOWNSTREAM) }
@@ -337,6 +364,7 @@ view-first{COLON}		{ YDVAR(1, VAR_VIEW_FIRST) }
 do-not-query-address{COLON}	{ YDVAR(1, VAR_DO_NOT_QUERY_ADDRESS) }
 do-not-query-localhost{COLON}	{ YDVAR(1, VAR_DO_NOT_QUERY_LOCALHOST) }
 access-control{COLON}		{ YDVAR(2, VAR_ACCESS_CONTROL) }
+interface-action{COLON}		{ YDVAR(2, VAR_INTERFACE_ACTION) }
 send-client-subnet{COLON}	{ YDVAR(1, VAR_SEND_CLIENT_SUBNET) }
 client-subnet-zone{COLON}	{ YDVAR(1, VAR_CLIENT_SUBNET_ZONE) }
 client-subnet-always-forward{COLON} { YDVAR(1, VAR_CLIENT_SUBNET_ALWAYS_FORWARD) }
@@ -350,8 +378,10 @@ max-ecs-tree-size-ipv6{COLON}	{ YDVAR(1, VAR_MAX_ECS_TREE_SIZE_IPV6) }
 hide-identity{COLON}		{ YDVAR(1, VAR_HIDE_IDENTITY) }
 hide-version{COLON}		{ YDVAR(1, VAR_HIDE_VERSION) }
 hide-trustanchor{COLON}		{ YDVAR(1, VAR_HIDE_TRUSTANCHOR) }
+hide-http-user-agent{COLON}		{ YDVAR(1, VAR_HIDE_HTTP_USER_AGENT) }
 identity{COLON}			{ YDVAR(1, VAR_IDENTITY) }
 version{COLON}			{ YDVAR(1, VAR_VERSION) }
+http-user-agent{COLON}			{ YDVAR(1, VAR_HTTP_USER_AGENT) }
 module-config{COLON}     	{ YDVAR(1, VAR_MODULE_CONF) }
 dlv-anchor{COLON}		{ YDVAR(1, VAR_DLV_ANCHOR) }
 dlv-anchor-file{COLON}		{ YDVAR(1, VAR_DLV_ANCHOR_FILE) }
@@ -364,6 +394,7 @@ root-key-sentinel{COLON}	{ YDVAR(1, VAR_ROOT_KEY_SENTINEL) }
 val-override-date{COLON}	{ YDVAR(1, VAR_VAL_OVERRIDE_DATE) }
 val-sig-skew-min{COLON}		{ YDVAR(1, VAR_VAL_SIG_SKEW_MIN) }
 val-sig-skew-max{COLON}		{ YDVAR(1, VAR_VAL_SIG_SKEW_MAX) }
+val-max-restart{COLON}		{ YDVAR(1, VAR_VAL_MAX_RESTART) }
 val-bogus-ttl{COLON}		{ YDVAR(1, VAR_BOGUS_TTL) }
 val-clean-additional{COLON}	{ YDVAR(1, VAR_VAL_CLEAN_ADDITIONAL) }
 val-permissive-mode{COLON}	{ YDVAR(1, VAR_VAL_PERMISSIVE_MODE) }
@@ -374,6 +405,8 @@ serve-expired-ttl{COLON}	{ YDVAR(1, VAR_SERVE_EXPIRED_TTL) }
 serve-expired-ttl-reset{COLON}	{ YDVAR(1, VAR_SERVE_EXPIRED_TTL_RESET) }
 serve-expired-reply-ttl{COLON}	{ YDVAR(1, VAR_SERVE_EXPIRED_REPLY_TTL) }
 serve-expired-client-timeout{COLON}	{ YDVAR(1, VAR_SERVE_EXPIRED_CLIENT_TIMEOUT) }
+ede-serve-expired{COLON}	{ YDVAR(1, VAR_EDE_SERVE_EXPIRED) }
+serve-original-ttl{COLON}	{ YDVAR(1, VAR_SERVE_ORIGINAL_TTL) }
 fake-dsa{COLON}			{ YDVAR(1, VAR_FAKE_DSA) }
 fake-sha1{COLON}		{ YDVAR(1, VAR_FAKE_SHA1) }
 val-log-level{COLON}		{ YDVAR(1, VAR_VAL_LOG_LEVEL) }
@@ -382,6 +415,9 @@ key-cache-slabs{COLON}		{ YDVAR(1, VAR_KEY_CACHE_SLABS) }
 neg-cache-size{COLON}		{ YDVAR(1, VAR_NEG_CACHE_SIZE) }
 val-nsec3-keysize-iterations{COLON}	{ 
 				  YDVAR(1, VAR_VAL_NSEC3_KEYSIZE_ITERATIONS) }
+zonemd-permissive-mode{COLON}	{ YDVAR(1, VAR_ZONEMD_PERMISSIVE_MODE) }
+zonemd-check{COLON}		{ YDVAR(1, VAR_ZONEMD_CHECK) }
+zonemd-reject-absence{COLON}	{ YDVAR(1, VAR_ZONEMD_REJECT_ABSENCE) }
 add-holddown{COLON}		{ YDVAR(1, VAR_ADD_HOLDDOWN) }
 del-holddown{COLON}		{ YDVAR(1, VAR_DEL_HOLDDOWN) }
 keep-missing{COLON}		{ YDVAR(1, VAR_KEEP_MISSING) }
@@ -402,6 +438,7 @@ insecure-lan-zones{COLON}	{ YDVAR(1, VAR_INSECURE_LAN_ZONES) }
 statistics-interval{COLON}	{ YDVAR(1, VAR_STATISTICS_INTERVAL) }
 statistics-cumulative{COLON}	{ YDVAR(1, VAR_STATISTICS_CUMULATIVE) }
 extended-statistics{COLON}	{ YDVAR(1, VAR_EXTENDED_STATISTICS) }
+statistics-inhibit-zero{COLON}	{ YDVAR(1, VAR_STATISTICS_INHIBIT_ZERO) }
 shm-enable{COLON}		{ YDVAR(1, VAR_SHM_ENABLE) }
 shm-key{COLON}			{ YDVAR(1, VAR_SHM_KEY) }
 remote-control{COLON}		{ YDVAR(0, VAR_REMOTE_CONTROL) }
@@ -415,6 +452,8 @@ control-key-file{COLON}		{ YDVAR(1, VAR_CONTROL_KEY_FILE) }
 control-cert-file{COLON}	{ YDVAR(1, VAR_CONTROL_CERT_FILE) }
 python-script{COLON}		{ YDVAR(1, VAR_PYTHON_SCRIPT) }
 python{COLON}			{ YDVAR(0, VAR_PYTHON) }
+dynlib-file{COLON}		{ YDVAR(1, VAR_DYNLIB_FILE) }
+dynlib{COLON}			{ YDVAR(0, VAR_DYNLIB) }
 domain-insecure{COLON}		{ YDVAR(1, VAR_DOMAIN_INSECURE) }
 minimal-responses{COLON}	{ YDVAR(1, VAR_MINIMAL_RESPONSES) }
 rrset-roundrobin{COLON}		{ YDVAR(1, VAR_RRSET_ROUNDROBIN) }
@@ -429,9 +468,14 @@ access-control-tag{COLON}	{ YDVAR(2, VAR_ACCESS_CONTROL_TAG) }
 access-control-tag-action{COLON} { YDVAR(3, VAR_ACCESS_CONTROL_TAG_ACTION) }
 access-control-tag-data{COLON}	{ YDVAR(3, VAR_ACCESS_CONTROL_TAG_DATA) }
 access-control-view{COLON}	{ YDVAR(2, VAR_ACCESS_CONTROL_VIEW) }
+interface-tag{COLON}		{ YDVAR(2, VAR_INTERFACE_TAG) }
+interface-tag-action{COLON}	{ YDVAR(3, VAR_INTERFACE_TAG_ACTION) }
+interface-tag-data{COLON}	{ YDVAR(3, VAR_INTERFACE_TAG_DATA) }
+interface-view{COLON}		{ YDVAR(2, VAR_INTERFACE_VIEW) }
 local-zone-override{COLON}	{ YDVAR(3, VAR_LOCAL_ZONE_OVERRIDE) }
 dnstap{COLON}			{ YDVAR(0, VAR_DNSTAP) }
 dnstap-enable{COLON}		{ YDVAR(1, VAR_DNSTAP_ENABLE) }
+dnstap-bidirectional{COLON}	{ YDVAR(1, VAR_DNSTAP_BIDIRECTIONAL) }
 dnstap-socket-path{COLON}	{ YDVAR(1, VAR_DNSTAP_SOCKET_PATH) }
 dnstap-ip{COLON}		{ YDVAR(1, VAR_DNSTAP_IP) }
 dnstap-tls{COLON}		{ YDVAR(1, VAR_DNSTAP_TLS) }
@@ -468,6 +512,11 @@ ratelimit-for-domain{COLON}	{ YDVAR(2, VAR_RATELIMIT_FOR_DOMAIN) }
 ratelimit-below-domain{COLON}	{ YDVAR(2, VAR_RATELIMIT_BELOW_DOMAIN) }
 ip-ratelimit-factor{COLON}		{ YDVAR(1, VAR_IP_RATELIMIT_FACTOR) }
 ratelimit-factor{COLON}		{ YDVAR(1, VAR_RATELIMIT_FACTOR) }
+ip-ratelimit-backoff{COLON}		{ YDVAR(1, VAR_IP_RATELIMIT_BACKOFF) }
+ratelimit-backoff{COLON}		{ YDVAR(1, VAR_RATELIMIT_BACKOFF) }
+outbound-msg-retry{COLON}		{ YDVAR(1, VAR_OUTBOUND_MSG_RETRY) }
+max-sent-count{COLON}		{ YDVAR(1, VAR_MAX_SENT_COUNT) }
+max-query-restarts{COLON}	{ YDVAR(1, VAR_MAX_QUERY_RESTARTS) }
 low-rtt{COLON}			{ YDVAR(1, VAR_LOW_RTT) }
 fast-server-num{COLON}		{ YDVAR(1, VAR_FAST_SERVER_NUM) }
 low-rtt-pct{COLON}		{ YDVAR(1, VAR_FAST_SERVER_PERMIL) }
@@ -489,11 +538,16 @@ dnscrypt-shared-secret-cache-slabs{COLON}	{
 		YDVAR(1, VAR_DNSCRYPT_SHARED_SECRET_CACHE_SLABS) }
 dnscrypt-nonce-cache-size{COLON}	{ YDVAR(1, VAR_DNSCRYPT_NONCE_CACHE_SIZE) }
 dnscrypt-nonce-cache-slabs{COLON}	{ YDVAR(1, VAR_DNSCRYPT_NONCE_CACHE_SLABS) }
+pad-responses{COLON}		{ YDVAR(1, VAR_PAD_RESPONSES) }
+pad-responses-block-size{COLON}	{ YDVAR(1, VAR_PAD_RESPONSES_BLOCK_SIZE) }
+pad-queries{COLON}		{ YDVAR(1, VAR_PAD_QUERIES) }
+pad-queries-block-size{COLON}	{ YDVAR(1, VAR_PAD_QUERIES_BLOCK_SIZE) }
 ipsecmod-enabled{COLON}		{ YDVAR(1, VAR_IPSECMOD_ENABLED) }
 ipsecmod-ignore-bogus{COLON}	{ YDVAR(1, VAR_IPSECMOD_IGNORE_BOGUS) }
 ipsecmod-hook{COLON}		{ YDVAR(1, VAR_IPSECMOD_HOOK) }
 ipsecmod-max-ttl{COLON}		{ YDVAR(1, VAR_IPSECMOD_MAX_TTL) }
 ipsecmod-whitelist{COLON}	{ YDVAR(1, VAR_IPSECMOD_WHITELIST) }
+ipsecmod-allow{COLON}		{ YDVAR(1, VAR_IPSECMOD_WHITELIST) }
 ipsecmod-strict{COLON}		{ YDVAR(1, VAR_IPSECMOD_STRICT) }
 cachedb{COLON}			{ YDVAR(0, VAR_CACHEDB) }
 backend{COLON}			{ YDVAR(1, VAR_CACHEDB_BACKEND) }
@@ -507,6 +561,11 @@ name-v4{COLON}			{ YDVAR(1, VAR_IPSET_NAME_V4) }
 name-v6{COLON}			{ YDVAR(1, VAR_IPSET_NAME_V6) }
 udp-upstream-without-downstream{COLON} { YDVAR(1, VAR_UDP_UPSTREAM_WITHOUT_DOWNSTREAM) }
 tcp-connection-limit{COLON}	{ YDVAR(2, VAR_TCP_CONNECTION_LIMIT) }
+edns-client-string{COLON}	{ YDVAR(2, VAR_EDNS_CLIENT_STRING) }
+edns-client-string-opcode{COLON} { YDVAR(1, VAR_EDNS_CLIENT_STRING_OPCODE) }
+nsid{COLON}			{ YDVAR(1, VAR_NSID ) }
+ede{COLON}			{ YDVAR(1, VAR_EDE ) }
+proxy-protocol-port{COLON}	{ YDVAR(1, VAR_PROXY_PROTOCOL_PORT) }
 <INITIAL,val>{NEWLINE}		{ LEXOUT(("NL\n")); cfg_parser->line++; }
 
 	/* Quoted strings. Strip leading and ending quotes */
@@ -563,7 +622,7 @@ tcp-connection-limit{COLON}	{ YDVAR(2, VAR_TCP_CONNECTION_LIMIT) }
 <include>\"		{ LEXOUT(("IQS ")); BEGIN(include_quoted); }
 <include>{UNQUOTEDLETTER}*	{
 	LEXOUT(("Iunquotedstr(%s) ", yytext));
-	config_start_include_glob(yytext);
+	config_start_include_glob(yytext, 0);
 	BEGIN(inc_prev);
 }
 <include_quoted><<EOF>>	{
@@ -576,7 +635,7 @@ tcp-connection-limit{COLON}	{ YDVAR(2, VAR_TCP_CONNECTION_LIMIT) }
 <include_quoted>\"	{
 	LEXOUT(("IQE "));
 	yytext[yyleng - 1] = '\0';
-	config_start_include_glob(yytext);
+	config_start_include_glob(yytext, 0);
 	BEGIN(inc_prev);
 }
 <INITIAL,val><<EOF>>	{
@@ -585,9 +644,45 @@ tcp-connection-limit{COLON}	{ YDVAR(2, VAR_TCP_CONNECTION_LIMIT) }
 	if (!config_include_stack) {
 		yyterminate();
 	} else {
+		int prev_toplevel = inc_toplevel;
 		fclose(yyin);
 		config_end_include();
+		if(prev_toplevel) return (VAR_FORCE_TOPLEVEL);
 	}
+}
+
+	/* include-toplevel: directive */
+<INITIAL,val>include-toplevel{COLON} {
+	LEXOUT(("v(%s) ", yytext)); inc_prev = YYSTATE; BEGIN(include_toplevel);
+}
+<include_toplevel><<EOF>> {
+	yyerror("EOF inside include_toplevel directive");
+	BEGIN(inc_prev);
+}
+<include_toplevel>{SPACE}* { LEXOUT(("ITSP ")); /* ignore */ }
+<include_toplevel>{NEWLINE} { LEXOUT(("NL\n")); cfg_parser->line++; }
+<include_toplevel>\" { LEXOUT(("ITQS ")); BEGIN(include_toplevel_quoted); }
+<include_toplevel>{UNQUOTEDLETTER}* {
+	LEXOUT(("ITunquotedstr(%s) ", yytext));
+	config_start_include_glob(yytext, 1);
+	BEGIN(inc_prev);
+	return (VAR_FORCE_TOPLEVEL);
+}
+<include_toplevel_quoted><<EOF>> {
+	yyerror("EOF inside quoted string");
+	BEGIN(inc_prev);
+}
+<include_toplevel_quoted>{DQANY}* { LEXOUT(("ITSTR(%s) ", yytext)); yymore(); }
+<include_toplevel_quoted>{NEWLINE} {
+	yyerror("newline before \" in include name");
+	cfg_parser->line++; BEGIN(inc_prev);
+}
+<include_toplevel_quoted>\" {
+	LEXOUT(("ITQE "));
+	yytext[yyleng - 1] = '\0';
+	config_start_include_glob(yytext, 1);
+	BEGIN(inc_prev);
+	return (VAR_FORCE_TOPLEVEL);
 }
 
 <val>{UNQUOTEDLETTER}*	{ LEXOUT(("unquotedstr(%s) ", yytext)); 

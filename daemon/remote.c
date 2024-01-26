@@ -105,8 +105,6 @@
 
 /** what to put on statistics lines between var and value, ": " or "=" */
 #define SQ "="
-/** if true, inhibits a lot of =0 lines from the stats output */
-static const int inhibit_zero = 1;
 
 /** subtract timers and the values do not overflow or become negative */
 static void
@@ -130,7 +128,7 @@ timeval_divide(struct timeval* avg, const struct timeval* sum, long long d)
 {
 #ifndef S_SPLINT_S
 	size_t leftover;
-	if(d == 0) {
+	if(d <= 0) {
 		avg->tv_sec = 0;
 		avg->tv_usec = 0;
 		return;
@@ -139,7 +137,13 @@ timeval_divide(struct timeval* avg, const struct timeval* sum, long long d)
 	avg->tv_usec = sum->tv_usec / d;
 	/* handle fraction from seconds divide */
 	leftover = sum->tv_sec - avg->tv_sec*d;
-	avg->tv_usec += (leftover*1000000)/d;
+	if(leftover <= 0)
+		leftover = 0;
+	avg->tv_usec += (((long long)leftover)*((long long)1000000))/d;
+	if(avg->tv_sec < 0)
+		avg->tv_sec = 0;
+	if(avg->tv_usec < 0)
+		avg->tv_usec = 0;
 #endif
 }
 
@@ -294,6 +298,7 @@ add_open(const char* ip, int nr, struct listen_port** list, int noproto_is_err,
 		 */
 		if(fd != -1) {
 #ifdef HAVE_CHOWN
+			chmod(ip, (mode_t)(S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP));
 			if (cfg->username && cfg->username[0] &&
 				cfg_uid != (uid_t)-1) {
 				if(chown(ip, cfg_uid, cfg_gid) == -1)
@@ -301,7 +306,6 @@ add_open(const char* ip, int nr, struct listen_port** list, int noproto_is_err,
 					  (unsigned)cfg_uid, (unsigned)cfg_gid,
 					  ip, strerror(errno));
 			}
-			chmod(ip, (mode_t)(S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP));
 #else
 			(void)cfg;
 #endif
@@ -329,7 +333,8 @@ add_open(const char* ip, int nr, struct listen_port** list, int noproto_is_err,
 
 		/* open fd */
 		fd = create_tcp_accept_sock(res, 1, &noproto, 0,
-			cfg->ip_transparent, 0, cfg->ip_freebind, cfg->use_systemd, cfg->ip_dscp);
+			cfg->ip_transparent, 0, 0, cfg->ip_freebind,
+			cfg->use_systemd, cfg->ip_dscp);
 		freeaddrinfo(res);
 	}
 
@@ -348,11 +353,7 @@ add_open(const char* ip, int nr, struct listen_port** list, int noproto_is_err,
 	/* alloc */
 	n = (struct listen_port*)calloc(1, sizeof(*n));
 	if(!n) {
-#ifndef USE_WINSOCK
-		close(fd);
-#else
-		closesocket(fd);
-#endif
+		sock_close(fd);
 		log_err("out of memory");
 		return 0;
 	}
@@ -367,13 +368,20 @@ struct listen_port* daemon_remote_open_ports(struct config_file* cfg)
 	struct listen_port* l = NULL;
 	log_assert(cfg->remote_control_enable && cfg->control_port);
 	if(cfg->control_ifs.first) {
-		struct config_strlist* p;
-		for(p = cfg->control_ifs.first; p; p = p->next) {
-			if(!add_open(p->str, cfg->control_port, &l, 1, cfg)) {
+		char** rcif = NULL;
+		int i, num_rcif = 0;
+		if(!resolve_interface_names(NULL, 0, cfg->control_ifs.first,
+			&rcif, &num_rcif)) {
+			return NULL;
+		}
+		for(i=0; i<num_rcif; i++) {
+			if(!add_open(rcif[i], cfg->control_port, &l, 1, cfg)) {
 				listening_ports_free(l);
+				config_del_strarray(rcif, num_rcif);
 				return NULL;
 			}
 		}
+		config_del_strarray(rcif, num_rcif);
 	} else {
 		/* defaults */
 		if(cfg->do_ip6 &&
@@ -461,11 +469,7 @@ int remote_accept_callback(struct comm_point* c, void* arg, int err,
 	if(rc->active >= rc->max_active) {
 		log_warn("drop incoming remote control: too many connections");
 	close_exit:
-#ifndef USE_WINSOCK
-		close(newfd);
-#else
-		closesocket(newfd);
-#endif
+		sock_close(newfd);
 		return 0;
 	}
 
@@ -488,8 +492,8 @@ int remote_accept_callback(struct comm_point* c, void* arg, int err,
 	n->c->do_not_close = 0;
 	comm_point_stop_listening(n->c);
 	comm_point_start_listening(n->c, -1, REMOTE_CONTROL_TCP_TIMEOUT);
-	memcpy(&n->c->repinfo.addr, &addr, addrlen);
-	n->c->repinfo.addrlen = addrlen;
+	memcpy(&n->c->repinfo.remote_addr, &addr, addrlen);
+	n->c->repinfo.remote_addrlen = addrlen;
 	if(rc->use_cert) {
 		n->shake_state = rc_hs_read;
 		n->ssl = SSL_new(rc->ctx);
@@ -574,11 +578,8 @@ ssl_print_text(RES* res, const char* text)
 			if(r == -1) {
 				if(errno == EAGAIN || errno == EINTR)
 					continue;
-#ifndef USE_WINSOCK
-				log_err("could not send: %s", strerror(errno));
-#else
-				log_err("could not send: %s", wsa_strerror(WSAGetLastError()));
-#endif
+				log_err("could not send: %s",
+					sock_strerror(errno));
 				return 0;
 			}
 			at += r;
@@ -635,11 +636,8 @@ ssl_read_line(RES* res, char* buf, size_t max)
 					}
 					if(errno == EINTR || errno == EAGAIN)
 						continue;
-#ifndef USE_WINSOCK
-					log_err("could not recv: %s", strerror(errno));
-#else
-					log_err("could not recv: %s", wsa_strerror(WSAGetLastError()));
-#endif
+					log_err("could not recv: %s",
+						sock_strerror(errno));
 					return 0;
 				}
 				break;
@@ -684,8 +682,9 @@ do_stop(RES* ssl, struct worker* worker)
 
 /** do the reload command */
 static void
-do_reload(RES* ssl, struct worker* worker)
+do_reload(RES* ssl, struct worker* worker, int reuse_cache)
 {
+	worker->reuse_cache = reuse_cache;
 	worker->need_to_exit = 0;
 	comm_base_exit(worker->base);
 	send_ok(ssl);
@@ -804,13 +803,16 @@ print_mem(RES* ssl, struct worker* worker, struct daemon* daemon,
 	size_t dnscrypt_shared_secret = 0;
 	size_t dnscrypt_nonce = 0;
 #endif /* USE_DNSCRYPT */
+#ifdef WITH_DYNLIBMODULE
+    size_t dynlib = 0;
+#endif /* WITH_DYNLIBMODULE */
 	msg = slabhash_get_mem(daemon->env->msg_cache);
 	rrset = slabhash_get_mem(&daemon->env->rrset_cache->table);
 	val = mod_get_mem(&worker->env, "validator");
 	iter = mod_get_mem(&worker->env, "iterator");
 	respip = mod_get_mem(&worker->env, "respip");
 #ifdef CLIENT_SUBNET
-	subnet = mod_get_mem(&worker->env, "subnet");
+	subnet = mod_get_mem(&worker->env, "subnetcache");
 #endif /* CLIENT_SUBNET */
 #ifdef USE_IPSECMOD
 	ipsecmod = mod_get_mem(&worker->env, "ipsecmod");
@@ -822,6 +824,9 @@ print_mem(RES* ssl, struct worker* worker, struct daemon* daemon,
 		dnscrypt_nonce = slabhash_get_mem(daemon->dnscenv->nonces_cache);
 	}
 #endif /* USE_DNSCRYPT */
+#ifdef WITH_DYNLIBMODULE
+    dynlib = mod_get_mem(&worker->env, "dynlib");
+#endif /* WITH_DYNLIBMODULE */
 
 	if(!print_longnum(ssl, "mem.cache.rrset"SQ, rrset))
 		return 0;
@@ -849,8 +854,18 @@ print_mem(RES* ssl, struct worker* worker, struct daemon* daemon,
 			dnscrypt_nonce))
 		return 0;
 #endif /* USE_DNSCRYPT */
+#ifdef WITH_DYNLIBMODULE
+	if(!print_longnum(ssl, "mem.mod.dynlibmod"SQ, dynlib))
+		return 0;
+#endif /* WITH_DYNLIBMODULE */
 	if(!print_longnum(ssl, "mem.streamwait"SQ,
 		(size_t)s->svr.mem_stream_wait))
+		return 0;
+	if(!print_longnum(ssl, "mem.http.query_buffer"SQ,
+		(size_t)s->svr.mem_http2_query_buffer))
+		return 0;
+	if(!print_longnum(ssl, "mem.http.response_buffer"SQ,
+		(size_t)s->svr.mem_http2_response_buffer))
 		return 0;
 	return 1;
 }
@@ -904,7 +919,7 @@ print_hist(RES* ssl, struct ub_stats_info* s)
 
 /** print extended stats */
 static int
-print_ext(RES* ssl, struct ub_stats_info* s)
+print_ext(RES* ssl, struct ub_stats_info* s, int inhibit_zero)
 {
 	int i;
 	char nm[32];
@@ -972,12 +987,16 @@ print_ext(RES* ssl, struct ub_stats_info* s)
 		(unsigned long)s->svr.qtcp)) return 0;
 	if(!ssl_printf(ssl, "num.query.tcpout"SQ"%lu\n", 
 		(unsigned long)s->svr.qtcp_outgoing)) return 0;
+	if(!ssl_printf(ssl, "num.query.udpout"SQ"%lu\n",
+		(unsigned long)s->svr.qudp_outgoing)) return 0;
 	if(!ssl_printf(ssl, "num.query.tls"SQ"%lu\n", 
 		(unsigned long)s->svr.qtls)) return 0;
 	if(!ssl_printf(ssl, "num.query.tls.resume"SQ"%lu\n", 
 		(unsigned long)s->svr.qtls_resume)) return 0;
 	if(!ssl_printf(ssl, "num.query.ipv6"SQ"%lu\n", 
 		(unsigned long)s->svr.qipv6)) return 0;
+	if(!ssl_printf(ssl, "num.query.https"SQ"%lu\n",
+		(unsigned long)s->svr.qhttps)) return 0;
 	/* flags */
 	if(!ssl_printf(ssl, "num.query.flags.QR"SQ"%lu\n", 
 		(unsigned long)s->svr.qbit_QR)) return 0;
@@ -1109,7 +1128,7 @@ do_stats(RES* ssl, struct worker* worker, int reset)
 			return;
 		if(!print_hist(ssl, &total))
 			return;
-		if(!print_ext(ssl, &total))
+		if(!print_ext(ssl, &total, daemon->cfg->stat_inhibit_zero))
 			return;
 	}
 }
@@ -1286,10 +1305,35 @@ do_zones_remove(RES* ssl, struct local_zones* zones)
 	(void)ssl_printf(ssl, "removed %d zones\n", num);
 }
 
+/** check syntax of newly added RR */
+static int
+check_RR_syntax(RES* ssl, char* str, int line)
+{
+	uint8_t rr[LDNS_RR_BUF_SIZE];
+	size_t len = sizeof(rr), dname_len = 0;
+	int s = sldns_str2wire_rr_buf(str, rr, &len, &dname_len, 3600,
+		NULL, 0, NULL, 0);
+	if(s != 0) {
+		char linestr[32];
+		if(line == 0)
+			linestr[0]=0;
+		else 	snprintf(linestr, sizeof(linestr), "line %d ", line);
+		if(!ssl_printf(ssl, "error parsing local-data at %sposition %d '%s': %s\n",
+			linestr, LDNS_WIREPARSE_OFFSET(s), str,
+			sldns_get_errorstr_parse(s)))
+			return 0;
+		return 0;
+	}
+	return 1;
+}
+
 /** Add new RR data */
 static int
-perform_data_add(RES* ssl, struct local_zones* zones, char* arg)
+perform_data_add(RES* ssl, struct local_zones* zones, char* arg, int line)
 {
+	if(!check_RR_syntax(ssl, arg, line)) {
+		return 0;
+	}
 	if(!local_zones_add_RR(zones, arg)) {
 		ssl_printf(ssl,"error in syntax or out of memory, %s\n", arg);
 		return 0;
@@ -1301,7 +1345,7 @@ perform_data_add(RES* ssl, struct local_zones* zones, char* arg)
 static void
 do_data_add(RES* ssl, struct local_zones* zones, char* arg)
 {
-	if(!perform_data_add(ssl, zones, arg))
+	if(!perform_data_add(ssl, zones, arg, 0))
 		return;
 	send_ok(ssl);
 }
@@ -1311,15 +1355,12 @@ static void
 do_datas_add(RES* ssl, struct local_zones* zones)
 {
 	char buf[2048];
-	int num = 0;
+	int num = 0, line = 0;
 	while(ssl_read_line(ssl, buf, sizeof(buf))) {
 		if(buf[0] == 0x04 && buf[1] == 0)
 			break; /* end of transmission */
-		if(!perform_data_add(ssl, zones, buf)) {
-			if(!ssl_printf(ssl, "error for input line: %s\n", buf))
-				return;
-		}
-		else
+		line++;
+		if(perform_data_add(ssl, zones, buf, line))
 			num++;
 	}
 	(void)ssl_printf(ssl, "added %d datas\n", num);
@@ -1921,6 +1962,8 @@ do_flush_name(RES* ssl, struct worker* w, char* arg)
 	do_cache_remove(w, nm, nmlen, LDNS_RR_TYPE_PTR, LDNS_RR_CLASS_IN);
 	do_cache_remove(w, nm, nmlen, LDNS_RR_TYPE_SRV, LDNS_RR_CLASS_IN);
 	do_cache_remove(w, nm, nmlen, LDNS_RR_TYPE_NAPTR, LDNS_RR_CLASS_IN);
+	do_cache_remove(w, nm, nmlen, LDNS_RR_TYPE_SVCB, LDNS_RR_CLASS_IN);
+	do_cache_remove(w, nm, nmlen, LDNS_RR_TYPE_HTTPS, LDNS_RR_CLASS_IN);
 	
 	free(nm);
 	send_ok(ssl);
@@ -1975,7 +2018,7 @@ print_root_fwds(RES* ssl, struct iter_forwards* fwds, uint8_t* root)
 
 /** parse args into delegpt */
 static struct delegpt*
-parse_delegpt(RES* ssl, char* args, uint8_t* nm, int allow_names)
+parse_delegpt(RES* ssl, char* args, uint8_t* nm)
 {
 	/* parse args and add in */
 	char* p = args;
@@ -1997,40 +2040,35 @@ parse_delegpt(RES* ssl, char* args, uint8_t* nm, int allow_names)
 		}
 		/* parse address */
 		if(!authextstrtoaddr(todo, &addr, &addrlen, &auth_name)) {
-			if(allow_names) {
-				uint8_t* n = NULL;
-				size_t ln;
-				int lb;
-				if(!parse_arg_name(ssl, todo, &n, &ln, &lb)) {
-					(void)ssl_printf(ssl, "error cannot "
-						"parse IP address or name "
-						"'%s'\n", todo);
-					delegpt_free_mlc(dp);
-					return NULL;
-				}
-				if(!delegpt_add_ns_mlc(dp, n, 0)) {
-					(void)ssl_printf(ssl, "error out of memory\n");
-					free(n);
-					delegpt_free_mlc(dp);
-					return NULL;
-				}
-				free(n);
-
-			} else {
+			uint8_t* dname= NULL;
+			int port;
+			dname = authextstrtodname(todo, &port, &auth_name);
+			if(!dname) {
 				(void)ssl_printf(ssl, "error cannot parse"
-					" IP address '%s'\n", todo);
+					" '%s'\n", todo);
+				delegpt_free_mlc(dp);
+				return NULL;
+			}
+#if ! defined(HAVE_SSL_SET1_HOST) && ! defined(HAVE_X509_VERIFY_PARAM_SET1_HOST)
+			if(auth_name)
+				log_err("no name verification functionality in "
+				"ssl library, ignored name for %s", todo);
+#endif
+			if(!delegpt_add_ns_mlc(dp, dname, 0, auth_name, port)) {
+				(void)ssl_printf(ssl, "error out of memory\n");
+				free(dname);
 				delegpt_free_mlc(dp);
 				return NULL;
 			}
 		} else {
 #if ! defined(HAVE_SSL_SET1_HOST) && ! defined(HAVE_X509_VERIFY_PARAM_SET1_HOST)
 			if(auth_name)
-			  log_err("no name verification functionality in "
+				log_err("no name verification functionality in "
 				"ssl library, ignored name for %s", todo);
 #endif
 			/* add address */
 			if(!delegpt_add_addr_mlc(dp, &addr, addrlen, 0, 0,
-				auth_name)) {
+				auth_name, -1)) {
 				(void)ssl_printf(ssl, "error out of memory\n");
 				delegpt_free_mlc(dp);
 				return NULL;
@@ -2063,7 +2101,7 @@ do_forward(RES* ssl, struct worker* worker, char* args)
 		forwards_delete_zone(fwd, LDNS_RR_CLASS_IN, root);
 	} else {
 		struct delegpt* dp;
-		if(!(dp = parse_delegpt(ssl, args, root, 0)))
+		if(!(dp = parse_delegpt(ssl, args, root)))
 			return;
 		if(!forwards_add_zone(fwd, LDNS_RR_CLASS_IN, dp)) {
 			(void)ssl_printf(ssl, "error out of memory\n");
@@ -2109,7 +2147,7 @@ parse_fs_args(RES* ssl, char* args, uint8_t** nm, struct delegpt** dp,
 
 	/* parse dp */
 	if(dp) {
-		if(!(*dp = parse_delegpt(ssl, args, *nm, 1))) {
+		if(!(*dp = parse_delegpt(ssl, args, *nm))) {
 			free(*nm);
 			return 0;
 		}
@@ -2505,6 +2543,8 @@ do_auth_zone_reload(RES* ssl, struct worker* worker, char* arg)
 	uint8_t* nm = NULL;
 	struct auth_zones* az = worker->env.auth_zones;
 	struct auth_zone* z = NULL;
+	struct auth_xfer* xfr = NULL;
+	char* reason = NULL;
 	if(!parse_arg_name(ssl, arg, &nm, &nmlen, &nmlabs))
 		return;
 	if(az) {
@@ -2513,19 +2553,63 @@ do_auth_zone_reload(RES* ssl, struct worker* worker, char* arg)
 		if(z) {
 			lock_rw_wrlock(&z->lock);
 		}
+		xfr = auth_xfer_find(az, nm, nmlen, LDNS_RR_CLASS_IN);
+		if(xfr) {
+			lock_basic_lock(&xfr->lock);
+		}
 		lock_rw_unlock(&az->lock);
 	}
 	free(nm);
 	if(!z) {
+		if(xfr) {
+			lock_basic_unlock(&xfr->lock);
+		}
 		(void)ssl_printf(ssl, "error no auth-zone %s\n", arg);
 		return;
 	}
 	if(!auth_zone_read_zonefile(z, worker->env.cfg)) {
 		lock_rw_unlock(&z->lock);
+		if(xfr) {
+			lock_basic_unlock(&xfr->lock);
+		}
 		(void)ssl_printf(ssl, "error failed to read %s\n", arg);
 		return;
 	}
+
+	z->zone_expired = 0;
+	if(xfr) {
+		xfr->zone_expired = 0;
+		if(!xfr_find_soa(z, xfr)) {
+			if(z->data.count == 0) {
+				lock_rw_unlock(&z->lock);
+				lock_basic_unlock(&xfr->lock);
+				(void)ssl_printf(ssl, "zone %s has no contents\n", arg);
+				return;
+			}
+			lock_rw_unlock(&z->lock);
+			lock_basic_unlock(&xfr->lock);
+			(void)ssl_printf(ssl, "error: no SOA in zone after read %s\n", arg);
+			return;
+		}
+		if(xfr->have_zone)
+			xfr->lease_time = *worker->env.now;
+		lock_basic_unlock(&xfr->lock);
+	}
+
+	auth_zone_verify_zonemd(z, &worker->env, &worker->env.mesh->mods,
+		&reason, 0, 0);
+	if(reason && z->zone_expired) {
+		lock_rw_unlock(&z->lock);
+		(void)ssl_printf(ssl, "error zonemd for %s failed: %s\n",
+			arg, reason);
+		free(reason);
+		return;
+	} else if(reason && strcmp(reason, "ZONEMD verification successful")
+		==0) {
+		(void)ssl_printf(ssl, "%s: %s\n", arg, reason);
+	}
 	lock_rw_unlock(&z->lock);
+	free(reason);
 	send_ok(ssl);
 }
 
@@ -2779,6 +2863,8 @@ struct ratelimit_list_arg {
 	int all;
 	/** current time */
 	time_t now;
+	/** if backoff is enabled */
+	int backoff;
 };
 
 #define ip_ratelimit_list_arg ratelimit_list_arg
@@ -2792,7 +2878,7 @@ rate_list(struct lruhash_entry* e, void* arg)
 	struct rate_data* d = (struct rate_data*)e->data;
 	char buf[257];
 	int lim = infra_find_ratelimit(a->infra, k->name, k->namelen);
-	int max = infra_rate_max(d, a->now);
+	int max = infra_rate_max(d, a->now, a->backoff);
 	if(a->all == 0) {
 		if(max < lim)
 			return;
@@ -2810,7 +2896,7 @@ ip_rate_list(struct lruhash_entry* e, void* arg)
 	struct ip_rate_key* k = (struct ip_rate_key*)e->key;
 	struct ip_rate_data* d = (struct ip_rate_data*)e->data;
 	int lim = infra_ip_ratelimit;
-	int max = infra_rate_max(d, a->now);
+	int max = infra_rate_max(d, a->now, a->backoff);
 	if(a->all == 0) {
 		if(max < lim)
 			return;
@@ -2828,6 +2914,7 @@ do_ratelimit_list(RES* ssl, struct worker* worker, char* arg)
 	a.infra = worker->env.infra_cache;
 	a.now = *worker->env.now;
 	a.ssl = ssl;
+	a.backoff = worker->env.cfg->ratelimit_backoff;
 	arg = skipwhite(arg);
 	if(strcmp(arg, "+a") == 0)
 		a.all = 1;
@@ -2846,6 +2933,7 @@ do_ip_ratelimit_list(RES* ssl, struct worker* worker, char* arg)
 	a.infra = worker->env.infra_cache;
 	a.now = *worker->env.now;
 	a.ssl = ssl;
+	a.backoff = worker->env.cfg->ip_ratelimit_backoff;
 	arg = skipwhite(arg);
 	if(strcmp(arg, "+a") == 0)
 		a.all = 1;
@@ -2853,6 +2941,57 @@ do_ip_ratelimit_list(RES* ssl, struct worker* worker, char* arg)
 		(a.all == 0 && infra_ip_ratelimit == 0))
 		return;
 	slabhash_traverse(a.infra->client_ip_rates, 0, ip_rate_list, &a);
+}
+
+/** do the rpz_enable/disable command */
+static void
+do_rpz_enable_disable(RES* ssl, struct worker* worker, char* arg, int enable) {
+    size_t nmlen;
+    int nmlabs;
+    uint8_t *nm = NULL;
+    struct auth_zones *az = worker->env.auth_zones;
+    struct auth_zone *z = NULL;
+    if (!parse_arg_name(ssl, arg, &nm, &nmlen, &nmlabs))
+        return;
+    if (az) {
+        lock_rw_rdlock(&az->lock);
+        z = auth_zone_find(az, nm, nmlen, LDNS_RR_CLASS_IN);
+        if (z) {
+            lock_rw_wrlock(&z->lock);
+        }
+        lock_rw_unlock(&az->lock);
+    }
+    free(nm);
+    if (!z) {
+        (void) ssl_printf(ssl, "error no auth-zone %s\n", arg);
+        return;
+    }
+    if (!z->rpz) {
+        (void) ssl_printf(ssl, "error auth-zone %s not RPZ\n", arg);
+        lock_rw_unlock(&z->lock);
+        return;
+    }
+    if (enable) {
+        rpz_enable(z->rpz);
+    } else {
+        rpz_disable(z->rpz);
+    }
+    lock_rw_unlock(&z->lock);
+    send_ok(ssl);
+}
+
+/** do the rpz_enable command */
+static void
+do_rpz_enable(RES* ssl, struct worker* worker, char* arg)
+{
+    do_rpz_enable_disable(ssl, worker, arg, 1);
+}
+
+/** do the rpz_disable command */
+static void
+do_rpz_disable(RES* ssl, struct worker* worker, char* arg)
+{
+    do_rpz_enable_disable(ssl, worker, arg, 0);
 }
 
 /** tell other processes to execute the command */
@@ -2891,8 +3030,11 @@ execute_cmd(struct daemon_remote* rc, RES* ssl, char* cmd,
 	if(cmdcmp(p, "stop", 4)) {
 		do_stop(ssl, worker);
 		return;
+	} else if(cmdcmp(p, "reload_keep_cache", 17)) {
+		do_reload(ssl, worker, 1);
+		return;
 	} else if(cmdcmp(p, "reload", 6)) {
-		do_reload(ssl, worker);
+		do_reload(ssl, worker, 0);
 		return;
 	} else if(cmdcmp(p, "stats_noreset", 13)) {
 		do_stats(ssl, worker, 0);
@@ -3055,6 +3197,10 @@ execute_cmd(struct daemon_remote* rc, RES* ssl, char* cmd,
 		do_flush_bogus(ssl, worker);
 	} else if(cmdcmp(p, "flush_negative", 14)) {
 		do_flush_negative(ssl, worker);
+    } else if(cmdcmp(p, "rpz_enable", 10)) {
+        do_rpz_enable(ssl, worker, skipwhite(p+10));
+    } else if(cmdcmp(p, "rpz_disable", 11)) {
+        do_rpz_disable(ssl, worker, skipwhite(p+11));
 	} else {
 		(void)ssl_printf(ssl, "error unknown command '%s'\n", p);
 	}
@@ -3106,11 +3252,7 @@ handle_req(struct daemon_remote* rc, struct rc_state* s, RES* res)
 				if(rr == 0) return;
 				if(errno == EINTR || errno == EAGAIN)
 					continue;
-#ifndef USE_WINSOCK
-				log_err("could not recv: %s", strerror(errno));
-#else
-				log_err("could not recv: %s", wsa_strerror(WSAGetLastError()));
-#endif
+				log_err("could not recv: %s", sock_strerror(errno));
 				return;
 			}
 			r = (int)rr;
@@ -3166,7 +3308,7 @@ remote_handshake_later(struct daemon_remote* rc, struct rc_state* s,
 		if(r == 0)
 			log_err("remote control connection closed prematurely");
 		log_addr(VERB_OPS, "failed connection from",
-			&s->c->repinfo.addr, s->c->repinfo.addrlen);
+			&s->c->repinfo.remote_addr, s->c->repinfo.remote_addrlen);
 		log_crypto_err("remote control failed ssl");
 		clean_point(rc, s);
 	}
@@ -3201,7 +3343,11 @@ int remote_control_callback(struct comm_point* c, void* arg, int err,
 	if (!rc->use_cert) {
 		verbose(VERB_ALGO, "unauthenticated remote control connection");
 	} else if(SSL_get_verify_result(s->ssl) == X509_V_OK) {
+#ifdef HAVE_SSL_GET1_PEER_CERTIFICATE
+		X509* x = SSL_get1_peer_certificate(s->ssl);
+#else
 		X509* x = SSL_get_peer_certificate(s->ssl);
+#endif
 		if(!x) {
 			verbose(VERB_DETAIL, "remote control connection "
 				"provided no client certificate");

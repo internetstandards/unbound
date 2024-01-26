@@ -41,7 +41,7 @@
  *
  * Use ub_ctx_create_event_ub_base() to create an unbound context that uses
  * the user provided event base API.  Then, use the ub_resolve_event call
- * to add DNS resolve queries to the context.  Those then run whith the
+ * to add DNS resolve queries to the context.  Those then run with the
  * provided event_base, and when they are done you get a function callback.
  *
  * This method does not fork another process or create a thread, the effort
@@ -230,7 +230,7 @@ int ub_ctx_set_event(struct ub_ctx* ctx, struct event_base* base);
  * @param callback: this is called on completion of the resolution.
  * 	It is called as:
  * 	void callback(void* mydata, int rcode, void* packet, int packet_len,
- * 		int sec, char* why_bogus)
+ * 		int sec, char* why_bogus, int was_ratelimited)
  * 	with mydata: the same as passed here, you may pass NULL,
  * 	with rcode: 0 on no error, nonzero for mostly SERVFAIL situations,
  *		this is a DNS rcode.
@@ -241,6 +241,7 @@ int ub_ctx_set_event(struct ub_ctx* ctx, struct event_base* base);
  *	with packet_len: length in bytes of the packet buffer.
  *	with sec: 0 if insecure, 1 if bogus, 2 if DNSSEC secure.
  *	with why_bogus: text string explaining why it is bogus (or NULL).
+ *	with was_ratelimited: if the query was ratelimited.
  *	These point to buffers inside unbound; do not deallocate the packet or
  *	error string.
  *

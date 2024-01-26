@@ -202,7 +202,7 @@ redis_register_client(struct module_env* env,
 static int
 redis_register_client_ttl(struct module_env* env,
 	struct internetnl_env* internetnl_env, struct module_qstate* qstate,
-	const char* clientip)
+	const char* ATTR_UNUSED(clientip))
 {
 	int n;
 	/* "EXPIRE ns_" + qname + " " + CONN_TEST_TTL + "\0" */
@@ -438,8 +438,8 @@ internetnl_handle_query(struct module_qstate* qstate,
 		char clientip_buf[128];
 		if(qstate->mesh_info->reply_list) {
 			addr_to_str(
-			&qstate->mesh_info->reply_list->query_reply.addr,
-			qstate->mesh_info->reply_list->query_reply.addrlen,
+			&qstate->mesh_info->reply_list->query_reply.remote_addr,
+			qstate->mesh_info->reply_list->query_reply.remote_addrlen,
 			clientip_buf, sizeof(clientip_buf));
 		}
 		if(!redis_register_client(qstate->env, ie, qstate,
@@ -460,7 +460,6 @@ bail_out:
 static struct ub_packed_rrset_key*
 rrset_from_str(struct regional* region, const char* rrstr)
 {
-	uint16_t rrtype = 0, rrclass = 0;
 	time_t ttl = 0;
 	uint8_t rr[LDNS_RR_BUF_SIZE];
 	uint8_t* rdata = NULL;
@@ -535,11 +534,10 @@ rep_from_rrstr(struct module_qstate* qstate, const char* rrstr)
 
 static void
 internetnl_handle_response(struct module_qstate* qstate,
-	struct internetnl_qstate* ATTR_UNUSED(iq), struct internetnl_env* ie,
-	int id)
+	struct internetnl_qstate* ATTR_UNUSED(iq),
+	struct internetnl_env* ATTR_UNUSED(ie), int id)
 {
 	char testid[ID_LABLEN+1];
-	struct rrset_parse* rrset, *prev;
 	testid[ID_LABLEN] = '\0';
 
 	/* Make answer authoritative */
