@@ -521,7 +521,7 @@ rep_from_rrstr(struct module_qstate* qstate, const char* rrstr)
 		qstate->return_msg->rep->prefetch_ttl,
 		qstate->return_msg->rep->serve_expired_ttl,
 		1, 0, 0, 1,
-		sec_status_insecure);
+		sec_status_insecure, LDNS_EDE_NONE);
 	if(!new_rep)
 		return;
 	if(!reply_info_alloc_rrset_keys(new_rep, NULL,
