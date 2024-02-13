@@ -900,6 +900,7 @@ with_protobuf_c
 enable_dnscrypt
 with_libsodium
 enable_cachedb
+enable_internetnl
 enable_ipsecmod
 enable_ipset
 with_libmnl
@@ -1602,6 +1603,7 @@ Optional Features:
   --enable-dnscrypt       Enable dnscrypt support (requires libsodium)
   --enable-cachedb        enable cachedb module that can use external cache
                           storage
+  --enable-internetnl     enable internetnl module
   --enable-ipsecmod       Enable ipsecmod module that facilitates
                           opportunistic IPsec
   --enable-ipset          enable ipset module
@@ -15548,7 +15550,7 @@ else
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -15594,7 +15596,7 @@ else
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -15618,7 +15620,7 @@ rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -15663,7 +15665,7 @@ else
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -15687,7 +15689,7 @@ rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
     We can't simply define LARGE_OFF_T to be 9223372036854775807,
     since some C++ compilers masquerading as C compilers
     incorrectly reject 9223372036854775807.  */
-#define LARGE_OFF_T (((off_t) 1 << 62) - 1 + ((off_t) 1 << 62))
+#define LARGE_OFF_T ((((off_t) 1 << 31) << 31) - 1 + (((off_t) 1 << 31) << 31))
   int off_t_is_large[(LARGE_OFF_T % 2147483629 == 721
 		       && LARGE_OFF_T % 2147483647 == 1)
 		      ? 1 : -1];
@@ -21621,6 +21623,23 @@ $as_echo "#define USE_CACHEDB 1" >>confdefs.h
 	CACHEDB_SRC="cachedb/cachedb.c cachedb/redis.c"
 
 	CACHEDB_OBJ="cachedb.lo redis.lo"
+
+    	;;
+    no|*)
+    	# nothing
+    	;;
+esac
+
+# check for internetnl if requested
+# Check whether --enable-internetnl was given.
+if test "${enable_internetnl+set}" = set; then :
+  enableval=$enable_internetnl;
+fi
+
+case "$enable_internetnl" in
+    yes)
+
+$as_echo "#define USE_INTERNETNL 1" >>confdefs.h
 
     	;;
     no|*)

@@ -1,42 +1,143 @@
-# Unbound
+# Unbound internet.nl branch
 
-[![Github Build Status](https://github.com/NLnetLabs/unbound/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/NLnetLabs/unbound/actions)
-[![Packaging status](https://repology.org/badge/tiny-repos/unbound.svg)](https://repology.org/project/unbound/versions)
-[![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/unbound.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:unbound)
-[![Documentation Status](https://readthedocs.org/projects/unbound/badge/?version=latest)](https://unbound.readthedocs.io/en/latest/?badge=latest)
-[![Mastodon Follow](https://img.shields.io/mastodon/follow/109262826617293067?domain=https%3A%2F%2Ffosstodon.org&style=social)](https://fosstodon.org/@nlnetlabs)
+Unbound branch containing the internetnl module, used for connection test and
+interactive mail test on internet.nl.
 
-Unbound is a validating, recursive, caching DNS resolver. It is designed to be
-fast and lean and incorporates modern features based on open standards. If you
-have any feedback, we would love to hear from you. Don’t hesitate to
-[create an issue on Github](https://github.com/NLnetLabs/unbound/issues/new)
-or post a message on the [Unbound mailing list](https://lists.nlnetlabs.nl/mailman/listinfo/unbound-users).
-You can learn more about Unbound by reading our
-[documentation](https://unbound.docs.nlnetlabs.nl/).
+## HOW TO KEEP THE FORK UP-TO-DATE
 
-## Compiling
+1. Clone the repository locally and set the upstream (for syncing with upstream):
+   ```
+   git remote add upstream https://github.com/NLnetLabs/unbound.git
+   ```
 
-Make sure you have the C toolchain, OpenSSL and its include files, and libexpat
-installed.
-If building from the repository source you also need flex and bison installed.
-Unbound can be compiled and installed using:
+2. If you need to sync with upstream on a previously cloned repo run:
+   ```
+   git fetch upstream master
+   git checkout master
+   git merge upstream/master
+   git push
+   ```
+
+3. Remember to checkout the proper branch again since we don't want any changes
+   on master:
+   ```
+   git checkout internetnl
+   ```
+
+
+## Installation
+ - Make sure that `swig` >= 3.0 is installed on your system
+
+   `apt install swig3.0`
+ - Change #defines on top of internetnl/internetnl.c to match test environment
+ - `./configure --prefix=$HOME/usr/local --enable-internetnl --with-pyunbound --with-libevent --with-libhiredis`
+ - `make install`
+
+## Configuration
+Three delegations from the `<base-domain>` (default base-domain = internet.nl)
+zone are required for this module:
+  - `mail-test`, IPv6 and IPv4 glue required
+  - `test-ns-signed`, IPv6 and IPv4 glue required, and DS at parent
+  - `test-ns6-signed`, must only have IPv6 glue, and DS at parent
+
+Unsigned example zonefiles are available in the `internetnl` directory. Don't
+forget to update the DKIM, SPF, DMARC and TLSA values to match the sending MTA,
+and the IP addresses.
 
 ```
-./configure && make && make install
+server:
+	local-zone: "." refuse
+	local-zone: "mail-test.<base-domain>" transparent
+	local-zone: "test-ns-signed.<base-domain>" transparent
+	local-zone: "test-ns6-signed.<base-domain>" transparent
+	interface: 0.0.0.0
+	access-control: 0.0.0.0/0 allow_setrd
+	module-config: "internetnl iterator"
+
+auth-zone:
+	name: "mail-test.<base-domain>"
+	zonefile: "mail-test.zone"
+	fallback-enabled: no
+	for-upstream: yes
+	for-downstream: no
+
+auth-zone:
+	name: "test-ns-signed.<base-domain>"
+	zonefile: "test-ns-signed.zone.signed"
+	fallback-enabled: no
+	for-upstream: yes
+	for-downstream: no
+
+auth-zone:
+	name: "test-ns6-signed.<base-domain>"
+	zonefile: "test-ns6-signed.zone.signed"
+	fallback-enabled: no
+	for-upstream: yes
+	for-downstream: no
+cachedb:
+	redis-server-host: 127.0.0.1
+	redis-server-port: 6379
+	redis-timeout: 1000
 ```
+## zone signing
+The `test-ns-signed` and `test-ns6-signed` zones must be signed.
 
-You can use libevent if you want. libevent is useful when using many (10000)
-outgoing ports. By default max 256 ports are opened at the same time and the
-builtin alternative is equally capable and a little faster.
+First generate the keys for this zone (we use a combined signing key here):
+ - `ldns-keygen -k -a RSASHA256 test-ns-signed.<base-domain>`
+ - `ldns-keygen -k -a RSASHA256 test-ns6-signed.<base-domain>`
 
-Use the `--with-libevent` configure option to compile Unbound with libevent
-support.
+Put the DS records in the <base-domain> zone, next to the delegation. The DS
+records can be found in `test-ns-signed.zone Ktest-ns-signed.<basedomain>.<keytag>.ds`
+and `Ktest-ns6-signed.<basedomain>.<keytag>.ds`
 
-## Unbound configuration
+Then sign the zones using a recent version of ldns-signzone:
+ - `ldns-signzone -u -n -o test-ns-signed.<base-domain> test-ns-signed.zone Ktest-ns-signed.<basedomain>.<keytag>`
+ - `ldns-signzone -u -n -o test-ns6-signed.<base-domain> test-ns6-signed.zone Ktest-ns-signed6.<basedomain>.<keytag>`
 
-All of Unbound's configuration options are described in the man pages, which
-will be installed and are available on the Unbound
-[documentation page](https://unbound.docs.nlnetlabs.nl/).
+Make the bogus wildcard records bogus by deleting RRSIGs:
+ - `sed -ie '/bogus.*IN\tRRSIG/d' test-ns-signed.zone.signed`
+ - `sed -ie '/bogus.*IN\tRRSIG/d' test-ns6-signed.zone.signed`
 
-An example configuration file is located in
-[doc/example.conf](https://github.com/NLnetLabs/unbound/blob/master/doc/example.conf.in).
+After signing the zones need to be reloaded by Unbound:
+ - `~/usr/local/sbin/unbound-control auth_zone_reload test-ns-signed.internet.nl.`
+ - `~/usr/local/sbin/unbound-control auth_zone_reload test-ns6-signed.internet.nl.A`
+ 
+
+Signing (and making the bogus records bogus) must be done periodically to
+prevent signatures from going to expire! It is recommendable to make a simple
+script to execute the ldns-signzone and sed commands from cron.
+to run from a conjob.
+
+## Interactive mail test query handling
+Email for the interactive mail test will be send from `<testid>`.`mail-test`.`<base-domain>`.
+
+## Testing validation anti spoofing standards
+Receivers of these email messages should now query for DKIM, DMARC and SPF
+records. Queries that will be logged, and there corresponding redis keys:
+  - TXT `<testid>`.`mail-test`.`<base-domain>` -->`interactivemailtest:spf:<testid>`
+  - TXT \_dmarc.`<testid>`.`mail-test`.`<base-domain>` --> `interactivemailtest:dmarc:<testid>`
+  - TXT selector.\_domainkey.`<testid>`.`mail-test`.`<base-domain>` --> `interactivemailtest:dkim:<testid>`
+
+## Testing DANE validation
+If the receiver of the email message will reply the mx record will be requested
+and generated by the internetnl Unbound module:
+ - MX `<testid>`.`mail-test`.`<base-domain>` --> `<testid>`.`test-ns-signed`.`<base-domain>`,
+   the default signed-lab is "test-ns-signed".
+
+If the user's MTA will validate DANE, a query will be send and logged in redis:
+  - TLSA \_25.\_tcp.`<testid>`.`test-ns-signed`.`<base-domain>` --> `interactivemailtest:dane:<testid>`.
+
+## Connection test query handling
+For queries for the connection test the address of the resolver contacting us
+will be logged.
+
+Connection test queries are a subdomain of:
+ - `conn`.`test-ns-signed`.`<base-domain>` 
+ - `bogus`.`conn`.`test-ns-signed`.`<base-domain>` 
+ - `conn`.`test-ns6-signed`.`<base-domain>`
+ - `bogus`.`conn`.`test-ns6-signed`.`<base-domain>`
+
+Queries that are subdomain of the bogus names will be answered with a DNSSEC
+bogus answer.
+
+Addresses will be logged in a redis set, with as key "ns\_`<qname>`"

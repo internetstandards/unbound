@@ -46,6 +46,8 @@
 /contrib/libunbound.pc
 /contrib/unbound.service
 /contrib/unbound.socket
+cscope.out
+tags
 /contrib/unbound_portable.service
 /dnstap/dnstap.pb-c.c
 /dnstap/dnstap.pb-c.h

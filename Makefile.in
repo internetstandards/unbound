@@ -122,7 +122,7 @@ iterator/iter_delegpt.c iterator/iter_donotq.c iterator/iter_fwd.c \
 iterator/iter_hints.c iterator/iter_priv.c iterator/iter_resptype.c \
 iterator/iter_scrub.c iterator/iter_utils.c services/listen_dnsport.c \
 services/localzone.c services/mesh.c services/modstack.c services/view.c \
-services/rpz.c util/rfc_1982.c \
+services/rpz.c util/rfc_1982.c internetnl/internetnl.c \
 services/outbound_list.c services/outside_network.c util/alloc.c \
 util/config_file.c util/configlexer.c util/configparser.c \
 util/shm_side/shm_main.c services/authzone.c \
@@ -148,6 +148,7 @@ outbound_list.lo alloc.lo config_file.lo configlexer.lo configparser.lo \
 fptr_wlist.lo siphash.lo edns.lo locks.lo log.lo mini_event.lo module.lo net_help.lo \
 random.lo rbtree.lo regional.lo rtt.lo dnstree.lo lookup3.lo lruhash.lo \
 slabhash.lo tcp_conn_limit.lo timehist.lo tube.lo winsock_event.lo \
+internetnl.lo \
 autotrust.lo val_anchor.lo rpz.lo rfc_1982.lo proxy_protocol.lo \
 validator.lo val_kcache.lo val_kentry.lo val_neg.lo val_nsec3.lo val_nsec.lo \
 val_secalgo.lo val_sigcrypt.lo val_utils.lo dns64.lo $(CACHEDB_OBJ) authzone.lo \
@@ -702,6 +703,7 @@ depend:
 
 # build rules
 ipset.lo ipset.o: $(srcdir)/ipset/ipset.c
+internetnl.lo internetnl.o: $(srcdir)/internetnl/internetnl.c
 
 # Dependencies
 dns.lo dns.o: $(srcdir)/services/cache/dns.c config.h $(srcdir)/iterator/iter_delegpt.h $(srcdir)/util/log.h \
@@ -861,7 +863,8 @@ modstack.lo modstack.o: $(srcdir)/services/modstack.c config.h $(srcdir)/service
  $(srcdir)/util/storage/dnstree.h $(srcdir)/services/view.h $(srcdir)/sldns/sbuffer.h \
  $(srcdir)/util/config_file.h $(srcdir)/services/authzone.h $(srcdir)/daemon/stats.h $(srcdir)/util/timehist.h \
  $(srcdir)/libunbound/unbound.h $(srcdir)/respip/respip.h $(srcdir)/dns64/dns64.h $(srcdir)/iterator/iterator.h \
- $(srcdir)/services/outbound_list.h $(srcdir)/validator/validator.h $(srcdir)/validator/val_utils.h
+ $(srcdir)/services/outbound_list.h $(srcdir)/validator/validator.h $(srcdir)/validator/val_utils.h \
+ $(srcdir)/cachedb/cachedb.h $(srcdir)/internetnl/internetnl.h
 view.lo view.o: $(srcdir)/services/view.c config.h $(srcdir)/services/view.h $(srcdir)/util/rbtree.h \
  $(srcdir)/util/locks.h $(srcdir)/util/log.h $(srcdir)/services/localzone.h $(srcdir)/util/storage/dnstree.h \
  $(srcdir)/util/module.h $(srcdir)/util/storage/lruhash.h $(srcdir)/util/data/msgreply.h \
@@ -876,6 +879,17 @@ rpz.lo rpz.o: $(srcdir)/services/rpz.c config.h $(srcdir)/services/rpz.h $(srcdi
   $(srcdir)/services/modstack.h $(srcdir)/libunbound/unbound.h \
  $(srcdir)/daemon/stats.h $(srcdir)/util/timehist.h $(srcdir)/respip/respip.h $(srcdir)/sldns/wire2str.h \
  $(srcdir)/sldns/str2wire.h $(srcdir)/util/data/dname.h $(srcdir)/util/net_help.h $(srcdir)/util/regional.h
+internetnl.lo internetnl.o: $(srcdir)/internetnl/internetnl.c config.h $(srcdir)/internetnl/internetnl.h \
+ $(srcdir)/util/module.h $(srcdir)/util/storage/lruhash.h $(srcdir)/util/locks.h $(srcdir)/util/log.h \
+ $(srcdir)/util/data/msgreply.h $(srcdir)/util/data/packed_rrset.h $(srcdir)/util/data/msgparse.h \
+ $(srcdir)/sldns/pkthdr.h $(srcdir)/sldns/rrdef.h $(srcdir)/util/regional.h $(srcdir)/util/config_file.h \
+ $(srcdir)/sldns/parseutil.h $(srcdir)/util/data/dname.h $(srcdir)/sldns/wire2str.h $(srcdir)/util/alloc.h \
+ $(srcdir)/util/net_help.h $(srcdir)/services/cache/dns.h $(srcdir)/services/localzone.h $(srcdir)/util/rbtree.h \
+ $(srcdir)/util/storage/dnstree.h $(srcdir)/services/view.h $(srcdir)/sldns/sbuffer.h $(srcdir)/sldns/str2wire.h \
+ $(srcdir)/services/mesh.h $(srcdir)/util/netevent.h $(srcdir)/dnscrypt/dnscrypt.h \
+  $(srcdir)/services/modstack.h $(srcdir)/services/rpz.h \
+ $(srcdir)/services/authzone.h $(srcdir)/daemon/stats.h $(srcdir)/util/timehist.h $(srcdir)/libunbound/unbound.h \
+ $(srcdir)/respip/respip.h
 outbound_list.lo outbound_list.o: $(srcdir)/services/outbound_list.c config.h \
  $(srcdir)/services/outbound_list.h $(srcdir)/services/outside_network.h $(srcdir)/util/rbtree.h \
  $(srcdir)/util/netevent.h $(srcdir)/dnscrypt/dnscrypt.h  \
@@ -962,7 +976,7 @@ fptr_wlist.lo fptr_wlist.o: $(srcdir)/util/fptr_wlist.c config.h $(srcdir)/util/
  $(srcdir)/validator/val_nsec3.h $(srcdir)/validator/val_sigcrypt.h $(srcdir)/validator/val_kentry.h \
  $(srcdir)/validator/val_neg.h $(srcdir)/validator/autotrust.h $(srcdir)/libunbound/libworker.h \
  $(srcdir)/libunbound/context.h $(srcdir)/util/alloc.h $(srcdir)/libunbound/unbound-event.h \
- $(srcdir)/libunbound/worker.h
+ $(srcdir)/libunbound/worker.h $(srcdir)/cachedb/cachedb.h $(srcdir)/internetnl/internetnl.h
 locks.lo locks.o: $(srcdir)/util/locks.c config.h $(srcdir)/util/locks.h $(srcdir)/util/log.h
 log.lo log.o: $(srcdir)/util/log.c config.h $(srcdir)/util/log.h $(srcdir)/util/locks.h $(srcdir)/sldns/sbuffer.h
 mini_event.lo mini_event.o: $(srcdir)/util/mini_event.c config.h $(srcdir)/util/mini_event.h $(srcdir)/util/rbtree.h \

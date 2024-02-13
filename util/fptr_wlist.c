@@ -93,6 +93,9 @@
 #ifdef CLIENT_SUBNET
 #include "edns-subnet/subnetmod.h"
 #endif
+#ifdef USE_INTERNETNL
+#include "internetnl/internetnl.h"
+#endif
 #ifdef USE_IPSET
 #include "ipset/ipset.h"
 #endif
@@ -414,6 +417,9 @@ fptr_whitelist_mod_init(int (*fptr)(struct module_env* env, int id))
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_init) return 1;
 #endif
+#ifdef USE_INTERNETNL
+	else if(fptr == &internetnl_init) return 1;
+#endif
 #ifdef USE_IPSET
 	else if(fptr == &ipset_init) return 1;
 #endif
@@ -441,6 +447,9 @@ fptr_whitelist_mod_deinit(void (*fptr)(struct module_env* env, int id))
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_deinit) return 1;
+#endif
+#ifdef USE_INTERNETNL
+	else if(fptr == &internetnl_deinit) return 1;
 #endif
 #ifdef USE_IPSET
 	else if(fptr == &ipset_deinit) return 1;
@@ -471,6 +480,9 @@ fptr_whitelist_mod_operate(void (*fptr)(struct module_qstate* qstate,
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_operate) return 1;
 #endif
+#ifdef USE_INTERNETNL
+	else if(fptr == &internetnl_operate) return 1;
+#endif
 #ifdef USE_IPSET
 	else if(fptr == &ipset_operate) return 1;
 #endif
@@ -499,6 +511,9 @@ fptr_whitelist_mod_inform_super(void (*fptr)(
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_inform_super) return 1;
+#endif
+#ifdef USE_INTERNETNL
+	else if(fptr == &internetnl_inform_super) return 1;
 #endif
 #ifdef USE_IPSET
 	else if(fptr == &ipset_inform_super) return 1;
@@ -529,6 +544,9 @@ fptr_whitelist_mod_clear(void (*fptr)(struct module_qstate* qstate,
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_clear) return 1;
 #endif
+#ifdef USE_INTERNETNL
+	else if(fptr == &internetnl_clear) return 1;
+#endif
 #ifdef USE_IPSET
 	else if(fptr == &ipset_clear) return 1;
 #endif
@@ -556,6 +574,9 @@ fptr_whitelist_mod_get_mem(size_t (*fptr)(struct module_env* env, int id))
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_get_mem) return 1;
+#endif
+#ifdef USE_INTERNETNL
+	else if(fptr == &internetnl_get_mem) return 1;
 #endif
 #ifdef USE_IPSET
 	else if(fptr == &ipset_get_mem) return 1;
