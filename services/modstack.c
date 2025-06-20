@@ -63,6 +63,9 @@
 #ifdef CLIENT_SUBNET
 #include "edns-subnet/subnetmod.h"
 #endif
+#ifdef USE_INTERNETNL
+#include "internetnl/internetnl.h"
+#endif
 #ifdef USE_IPSET
 #include "ipset/ipset.h"
 #endif
@@ -168,6 +171,9 @@ module_list_avail(void)
 #ifdef CLIENT_SUBNET
 		"subnetcache",
 #endif
+#ifdef USE_INTERNETNL
+		"internetnl",
+#endif
 #ifdef USE_IPSET
 		"ipset",
 #endif
@@ -201,6 +207,9 @@ module_funcs_avail(void)
 #endif
 #ifdef CLIENT_SUBNET
 		&subnetmod_get_funcblock,
+#endif
+#ifdef USE_INTERNETNL
+		&internetnl_get_funcblock,
 #endif
 #ifdef USE_IPSET
 		&ipset_get_funcblock,

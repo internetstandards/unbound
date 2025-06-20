@@ -3947,7 +3947,7 @@ cachedb_check_when_serve_expired: VAR_CACHEDB_CHECK_WHEN_SERVE_EXPIRED STRING_AR
 	;
 redis_server_host: VAR_CACHEDB_REDISHOST STRING_ARG
 	{
-	#if defined(USE_CACHEDB) && defined(USE_REDIS)
+	#if (defined(USE_CACHEDB)||defined(USE_INTERNETNL)) && defined(USE_REDIS)
 		OUTYY(("P(redis_server_host:%s)\n", $2));
 		free(cfg_parser->cfg->redis_server_host);
 		cfg_parser->cfg->redis_server_host = $2;
@@ -3971,7 +3971,7 @@ redis_replica_server_host: VAR_CACHEDB_REDISREPLICAHOST STRING_ARG
 	;
 redis_server_port: VAR_CACHEDB_REDISPORT STRING_ARG
 	{
-	#if defined(USE_CACHEDB) && defined(USE_REDIS)
+	#if (defined(USE_CACHEDB)||defined(USE_INTERNETNL)) && defined(USE_REDIS)
 		int port;
 		OUTYY(("P(redis_server_port:%s)\n", $2));
 		port = atoi($2);
@@ -4049,7 +4049,7 @@ redis_replica_server_password: VAR_CACHEDB_REDISREPLICAPASSWORD STRING_ARG
 	;
 redis_timeout: VAR_CACHEDB_REDISTIMEOUT STRING_ARG
 	{
-	#if defined(USE_CACHEDB) && defined(USE_REDIS)
+	#if (defined(USE_CACHEDB)||defined(USE_INTERNETNL)) && defined(USE_REDIS)
 		OUTYY(("P(redis_timeout:%s)\n", $2));
 		if(atoi($2) == 0)
 			yyerror("redis timeout value expected");

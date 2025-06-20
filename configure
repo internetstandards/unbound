@@ -933,6 +933,7 @@ with_protobuf_c
 enable_dnscrypt
 with_libsodium
 enable_cachedb
+enable_internetnl
 enable_ipsecmod
 enable_ipset
 with_libmnl
@@ -1637,6 +1638,7 @@ Optional Features:
   --enable-dnscrypt       Enable dnscrypt support (requires libsodium)
   --enable-cachedb        enable cachedb module that can use external cache
                           storage
+  --enable-internetnl     enable internetnl module
   --enable-ipsecmod       Enable ipsecmod module that facilitates
                           opportunistic IPsec
   --enable-ipset          enable ipset module
@@ -3251,7 +3253,7 @@ UNBOUND_VERSION_MAJOR=1
 
 UNBOUND_VERSION_MINOR=23
 
-UNBOUND_VERSION_MICRO=0
+UNBOUND_VERSION_MICRO=1
 
 
 LIBUNBOUND_CURRENT=9
@@ -24777,6 +24779,23 @@ printf "%s\n" "#define USE_CACHEDB 1" >>confdefs.h
 	CACHEDB_SRC="cachedb/cachedb.c cachedb/redis.c"
 
 	CACHEDB_OBJ="cachedb.lo redis.lo"
+
+    	;;
+    no|*)
+    	# nothing
+    	;;
+esac
+
+# check for internetnl if requested
+# Check whether --enable-internetnl was given.
+if test "${enable_internetnl+set}" = set; then :
+  enableval=$enable_internetnl;
+fi
+
+case "$enable_internetnl" in
+    yes)
+
+$as_echo "#define USE_INTERNETNL 1" >>confdefs.h
 
     	;;
     no|*)
