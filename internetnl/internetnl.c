@@ -520,7 +520,7 @@ rep_from_rrstr(struct module_qstate* qstate, const char* rrstr)
 		qstate->return_msg->rep->ttl, 
 		qstate->return_msg->rep->prefetch_ttl,
 		qstate->return_msg->rep->serve_expired_ttl,
-		1, 0, 0, 1,
+		1, 0, 0, 0, 1,
 		sec_status_insecure, LDNS_EDE_NONE);
 	if(!new_rep)
 		return;
@@ -651,6 +651,7 @@ internetnl_get_mem(struct module_env* env, int id)
  */
 static struct module_func_block internetnl_block = {
 	"internetnl",
+	NULL, NULL,
 	&internetnl_init, &internetnl_deinit, &internetnl_operate,
 	&internetnl_inform_super, &internetnl_clear, &internetnl_get_mem
 };
