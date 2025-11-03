@@ -25007,14 +25007,15 @@ esac
 
 # check for internetnl if requested
 # Check whether --enable-internetnl was given.
-if test "${enable_internetnl+set}" = set; then :
+if test ${enable_internetnl+y}
+then :
   enableval=$enable_internetnl;
 fi
 
 case "$enable_internetnl" in
     yes)
 
-$as_echo "#define USE_INTERNETNL 1" >>confdefs.h
+printf "%s\n" "#define USE_INTERNETNL 1" >>confdefs.h
 
     	;;
     no|*)
